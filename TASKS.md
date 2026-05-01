@@ -17,31 +17,31 @@
 
 ### Sprint 2 — Login Resiliente
 **Objetivo:** robô faz login com sucesso e detecta falhas.
-- [ ] `core/visao.py` com `aguardar_imagem(referencia, timeout)` e `clicar_imagem(referencia)`
-- [ ] `core/acoes.py::fazer_login()` cobrindo passos 01–07 das referências
-- [ ] Tratamento de popup inicial (passo 02) condicional
-- [ ] Retry com tenacity (3 tentativas, backoff exponencial)
-- [ ] Detecção de credencial inválida → exit code 2
-- [ ] Senha mascarada em todos os logs
-- [ ] Demo: login completo até home em ambiente real
+- [x] `core/visao.py` com `aguardar_imagem(referencia, timeout)` e `clicar_imagem(referencia)`
+- [x] `core/acoes.py::fazer_login()` cobrindo passos 01–07 das referências
+- [x] Tratamento de popup inicial (passo 02) condicional
+- [x] Retry com tenacity (3 tentativas, backoff exponencial)
+- [x] Detecção de credencial inválida → exit code 2
+- [x] Senha mascarada em todos os logs
+- [x] Demo: login completo até home em ambiente real
 
 ### Sprint 3 — Navegação até a Rotina
 **Objetivo:** robô chega à tela de filtro de técnico.
-- [ ] `acoes.py::navegar_ate_rotina()` cobrindo passos 07–11
-- [ ] Tratamento condicional do popup "7 dias" (passo 10)
-- [ ] Validação de estado entre cada clique
-- [ ] Demo: da home até campo de código preenchível
+- [x] `acoes.py::navegar_ate_rotina()` cobrindo passos 07–11
+- [x] Tratamento condicional do popup "7 dias" (passo 10)
+- [x] Validação de estado entre cada clique
+- [x] Demo: da home até campo de código preenchível
 
 ### Sprint 4 — Download de 1 Técnico (hardcoded)
 **Objetivo:** baixar 1 XLSX ponta-a-ponta para um código fixo do `technicians.json`.
-- [ ] `acoes.py::baixar_xlsx_tecnico(code, name)` cobrindo passos 11–18
-- [ ] Captura do evento `download` do Playwright (timeout 60s configurável via `DOWNLOAD_TIMEOUT_S`)
-- [ ] Renomeação para `{code}_{name_norm}.xlsx` em `downloads/AAAA-MM-DD/`
-- [ ] Validação: arquivo > 0 bytes + abre como zip (`zipfile.is_zipfile`)
-- [ ] **Cálculo do hash SHA-256** do arquivo baixado (gravado no checkpoint na Sprint 5)
-- [ ] **Validação OCR opcional do `name`** (PRD F3 passo 3): se o JSON traz `name`, OCR na região do nome retornado + comparação fuzzy via `rapidfuzz`. Mismatch → log warning, não bloqueia.
-- [ ] Espera retorno automático à home (passo 18, sleep 7s — exceção documentada em PRD §13.8)
-- [ ] Recovery: se sistema não retornar à home em 15s → forçar via Esc/Voltar
+- [x] `acoes.py::baixar_xlsx_tecnico(code, name)` cobrindo passos 11–18
+- [x] Captura do evento `download` do Playwright (timeout 60s configurável via `DOWNLOAD_TIMEOUT_S`)
+- [x] Renomeação para `{code}_{name_norm}.xlsx` em `downloads/AAAA-MM-DD/`
+- [x] Validação: arquivo > 0 bytes + abre como zip (`zipfile.is_zipfile`)
+- [x] **Cálculo do hash SHA-256** do arquivo baixado (gravado no checkpoint na Sprint 5)
+- [x] **Validação OCR opcional do `name`** (PRD F3 passo 3): se o JSON traz `name`, OCR na região do nome retornado + comparação fuzzy via `rapidfuzz`. Mismatch → log warning, não bloqueia.
+- [x] Espera retorno automático à home (passo 18, sleep 7s — exceção documentada em PRD §13.8)
+- [x] Recovery: se sistema não retornar à home em 15s → forçar via Esc/Voltar
 - [ ] Demo: 1 XLSX baixado, validado, organizado em `downloads/AAAA-MM-DD/`
 
 ### Sprint 5 — Loop pela Lista JSON + Checkpoint
