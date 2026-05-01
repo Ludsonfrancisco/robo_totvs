@@ -1,0 +1,233 @@
+[
+    {
+        "code": "HK",
+        "name": "ALEXANDRE MENEZES DE SOUZA - DMAIS (VAREJO)",
+        "login": "ALEXANDRE MENEZES DE SOUZA - DMAIS (VAREJO)",
+        "status": "Ativo",
+        "email": "alexandre.souza@dmais.com.br"
+    },
+    {
+        "code": "HJ",
+        "name": "ANDERSON NASCIMENTO DE SOUZA - DMAIS (VAREJO)",
+        "login": "ANDERSON NASCIMENTO DE SOUZA - DMAIS (VAREJO)",
+        "status": "Ativo",
+        "email": "anderson.souza@dmais.com.br"
+    },
+    {
+        "code": "GS",
+        "name": "BRUNO ROSSONI BOFF - DMAIS",
+        "login": "BRUNO ROSSONI BOFF - DMAIS",
+        "status": "Desligado",
+        "email": "bruno.boff@dmais.com.br"
+    },
+    {
+        "code": "AB",
+        "name": "CELSO RICARDO SILVA DA COSTA - DMAIS (VAREJO)",
+        "login": "CELSO RICARDO SILVA DA COSTA - DMAIS (VAREJO)",
+        "status": "Ativo",
+        "email": "celso.costa@dmais.com.br"
+    },
+    {
+        "code": "8Q",
+        "name": "CLAUDIO OLIVEIRA DE MORAIS - DMAIS (VAREJO)",
+        "login": "CLAUDIO OLIVEIRA DE MORAIS - DMAIS (VAREJO)",
+        "status": "Ativo",
+        "email": "claudio.morais@dmais.com.br"
+    },
+    {
+        "code": "C3",
+        "name": "DIEGO LUIZ DE OLIVEIRA DAVID ANDRADE - DMAIS",
+        "login": "DIEGO LUIZ DE OLIVEIRA DAVID ANDRADE - DMAIS",
+        "status": "Ativo",
+        "email": "diego.andrade@dmais.com.br"
+    },
+    {
+        "code": "AL",
+        "name": "EDIVALDO SANTOS GUSMAO - DMAIS (VAREJO)",
+        "login": "EDIVALDO SANTOS GUSMAO - DMAIS (VAREJO)",
+        "status": "Ativo",
+        "email": "edivaldo.gusmao@dmais.com.br"
+    },
+    {
+        "code": "BZ",
+        "name": "FABIO LUIZ CORREA - DMAIS (VAREJO)",
+        "login": "FABIO LUIZ CORREA - DMAIS (VAREJO)",
+        "status": "Desligado",
+        "email": "fabio.correa@dmais.com.br"
+    },
+    {
+        "code": "FU",
+        "name": "FERNANDO AURELIO DE FARIA - DMAIS (VAREJO)",
+        "login": "FERNANDO AURELIO DE FARIA - DMAIS (VAREJO)",
+        "status": "Ativo",
+        "email": "fernando.faria@dmais.com.br"
+    },
+    {
+        "code": "HO",
+        "name": "GABRIEL SOUZA OLIVEIRA - DMAIS (VAREJO)",
+        "login": "GABRIEL SOUZA OLIVEIRA - DMAIS (VAREJO)",
+        "status": "Ativo",
+        "email": "gabriel.oliveira@dmais.com.br"
+    },
+    {
+        "code": "HD",
+        "name": "JEAN SENA JACINTO - DMAIS (VAREJO)",
+        "login": "JEAN SENA JACINTO - DMAIS (VAREJO)",
+        "status": "Desligado",
+        "email": "jean.jacinto@dmais.com.br"
+    },
+    {
+        "code": "GZ",
+        "name": "JEFFERSON DOS SANTOS DE SOUZA - DMAIS(VAREJO)",
+        "login": "JEFFERSON DOS SANTOS DE SOUZA - DMAIS(VAREJO)",
+        "status": "Ativo",
+        "email": "jefferson.souza@dmais.com.br"
+    },
+    {
+        "code": "5X",
+        "name": "JOCIMAR JESUS DE SOUZA - DMAIS",
+        "login": "JOCIMAR JESUS DE SOUZA - DMAIS",
+        "status": "Ativo",
+        "email": "jocimar.souza@dmais.com.br"
+    },
+    {
+        "code": "P9",
+        "name": "JORGE LUIS DA SILVA ALVES - DMAIS",
+        "login": "JORGE LUIS DA SILVA ALVES - DMAIS",
+        "status": "Ativo",
+        "email": "jorge.alves@dmais.com.br"
+    },
+    {
+        "code": "GJ",
+        "name": "JULIO MATHEUS LIMA DA SILVA NETO - DMAIS",
+        "login": "JULIO MATHEUS LIMA DA SILVA NETO - DMAIS",
+        "status": "Ativo",
+        "email": "julio.neto@dmais.com.br"
+    },
+    {
+        "code": "HV",
+        "name": "LEANDRO NASCIMENTO DA SILVA - DMAIS (VAREJO)",
+        "login": "LEANDRO NASCIMENTO DA SILVA - DMAIS (VAREJO)",
+        "status": "Ativo",
+        "email": "leandro.silva@dmais.com.br"
+    },
+    {
+        "code": "CE",
+        "name": "LEONARDO SASSI BERNARDO - DMAIS (VAREJO)",
+        "login": "LEONARDO SASSI BERNARDO - DMAIS (VAREJO)",
+        "status": "Desligado",
+        "email": "leonardo.bernardo@dmais.com.br"
+    },
+    {
+        "code": "BM",
+        "name": "NIELSON ROCHA SANTANA - DMAIS (VAREJO)",
+        "login": "NIELSON ROCHA SANTANA - DMAIS (VAREJO)",
+        "status": "Ativo",
+        "email": "nielson.santana@dmais.com.br"
+    },
+    {
+        "code": "BY",
+        "name": "NILSON DE OLIVEIRA FRITZ - DMAIS (VAREJO)",
+        "login": "NILSON DE OLIVEIRA FRITZ - DMAIS (VAREJO)",
+        "status": "Ativo",
+        "email": "nilson.fritz@dmais.com.br"
+    },
+    {
+        "code": "BW",
+        "name": "RENATO AUGUSTO DA CONCEICAO - DMAIS",
+        "login": "RENATO AUGUSTO DA CONCEICAO - DMAIS",
+        "status": "Ativo",
+        "email": "renato.conceicao@dmais.com.br"
+    },
+    {
+        "code": "EM",
+        "name": "RICARDO DE OLIVEIRA LOUREIRO - DMAIS (VAREJO)",
+        "login": "RICARDO DE OLIVEIRA LOUREIRO - DMAIS (VAREJO)",
+        "status": "Ativo",
+        "email": "ricardo.loureiro@dmais.com.br"
+    },
+    {
+        "code": "FX",
+        "name": "RICKSSON ALEXSANDER LIMA DA SILVA - DMAIS",
+        "login": "RICKSSON ALEXSANDER LIMA DA SILVA - DMAIS",
+        "status": "Desligado",
+        "email": "ricksson.silva@dmais.com.br"
+    },
+    {
+        "code": "FS",
+        "name": "RINGO DE PAULA CHAVES - DMAIS (VAREJO)",
+        "login": "RINGO DE PAULA CHAVES - DMAIS (VAREJO)",
+        "status": "Desligado",
+        "email": "ringo.chaves@dmais.com.br"
+    },
+    {
+        "code": "FT",
+        "name": "ROBERT ARGEU DE LIMA JOVENCIO - DMAIS (VAREJO)",
+        "login": "ROBERT ARGEU DE LIMA JOVENCIO - DMAIS (VAREJO)",
+        "status": "Desligado",
+        "email": "robert.jovencio@dmais.com.br"
+    },
+    {
+        "code": "FE",
+        "name": "ROBSON LOPES DOS REIS - DMAIS (VAREJO)",
+        "login": "ROBSON LOPES DOS REIS - DMAIS (VAREJO)",
+        "status": "Ativo",
+        "email": "robson.reis@dmais.com.br"
+    },
+    {
+        "code": "X2",
+        "name": "ROBSON SILVA CORREIA - DMAIS (VAREJO)",
+        "login": "ROBSON SILVA CORREIA - DMAIS (VAREJO)",
+        "status": "Ativo",
+        "email": "robson.correia@dmais.com.br"
+    },
+    {
+        "code": "FV",
+        "name": "THIAGO DE OLIVEIRA SABINO - DMAIS (VAREJO)",
+        "login": "THIAGO DE OLIVEIRA SABINO - DMAIS (VAREJO)",
+        "status": "Ativo",
+        "email": "thiago.sabino@dmais.com.br"
+    },
+    {
+        "code": "GX",
+        "name": "MADSON",
+        "login": "WANDERSON COSTA ALVARENGA - DMAIS (VAREJO)",
+        "status": "Ativo",
+        "email": "wanderson.alvarenga@dmais.com.br"
+    },
+    {
+        "code": "Q6",
+        "name": "WEDSON CORREA - DMAIS",
+        "login": "WEDSON CORREA - DMAIS",
+        "status": "Ativo",
+        "email": "wedson.correia@dmais.com.br"
+    },
+    {
+        "code": "GL",
+        "name": "WELINGTON SAVIO ALVARENGA PEREIRA - DMAIS",
+        "login": "WELINGTON SAVIO ALVARENGA PEREIRA - DMAIS",
+        "status": "Ativo",
+        "email": "welington.pereira@dmais.com.br"
+    },
+    {
+        "code": "2S",
+        "name": "YURI SMARSARO AMORIM - DMAIS",
+        "login": "YURI SMARSARO AMORIM - DMAIS",
+        "status": "Ativo",
+        "email": "yuri.amorim@dmais.com.br"
+    },
+    {
+        "code": "DJ",
+        "name": "LOGISTICA VVA",
+        "login": "",
+        "status": "Ativo",
+        "email": ""
+    },
+    {
+        "code": "CT",
+        "name": "LOGISTICA ACZ",
+        "login": "",
+        "status": "Ativo",
+        "email": ""
+    }
+]
