@@ -575,7 +575,10 @@ def _executar_download(page: Page, code: str, name: str) -> dict:
     # Passo F3.3 (Opcional): Validação OCR
     if name:
         log.bind(etapa="download", tecnico=code).info("Validando nome via OCR...")
-        validar_texto_ocr(page, name) # Apenas loga warning em caso de mismatch (não bloqueia)
+        try:
+            validar_texto_ocr(page, name) # Apenas loga warning em caso de mismatch (não bloqueia)
+        except Exception as e:
+            log.bind(etapa="download", tecnico=code).warning(f"OCR falhou ou não disponível: {e}")
     
     # Passo 13: Selecionar Planilha
     clicou_planilha = False
@@ -608,17 +611,38 @@ def _executar_download(page: Page, code: str, name: str) -> dict:
     _time.sleep(1)
     
     # Passo 14: Selecionar tipo de planilha
+    log.bind(etapa="download", tecnico=code).info("Selecionando tipo de planilha (14)...")
     clicou_tipo = False
+    clicou_tipo_dom = False
+    
+    # User hint: use select_option("select", value="3")
+    # We'll try this across all frames with a bit more persistence
     for ctx in [page, *page.frames]:
         try:
-            # Look for the combo box representing "Tipo de planilha" or just click the combo icon near it.
-            # In TOTVS the combobox is often adjacent to the label.
-            # Or just rely on template match as it's a very specific combobox
-            pass
+            selects = ctx.locator("select").all()
+            if selects:
+                log.bind(etapa="download", tecnico=code).debug(f"Encontrado(s) {len(selects)} select(s) no frame {ctx.url}")
+                # Try to find the one that has '3' as an option or just try the first one if only one exists
+                for sel in selects:
+                    if sel.is_visible(timeout=500):
+                        try:
+                            # Check if value '3' exists in options
+                            options = sel.locator("option").all()
+                            values = [opt.get_attribute("value") for opt in options]
+                            if "3" in values:
+                                sel.select_option(value="3")
+                                log.bind(etapa="download", tecnico=code).info(f"Selecionou tipo de planilha '3' via DOM no frame {ctx.url}")
+                                clicou_tipo = True
+                                clicou_tipo_dom = True
+                                break
+                        except:
+                            continue
+                if clicou_tipo: break
         except Exception:
             continue
             
     if not clicou_tipo:
+        log.bind(etapa="download", tecnico=code).debug("Fallback para matching no dropdown Tipo de Planilha")
         clicou_tipo = clicar_imagem(page, "14_clicar_tipo_de_planilha.png", timeout=15, threshold=0.65)
         
     if not clicou_tipo:
@@ -627,76 +651,79 @@ def _executar_download(page: Page, code: str, name: str) -> dict:
         
     _time.sleep(1)
     
-    # Passo 15: Definir formato XLSX
-    clicou_formato = False
-    seletores_formato = [
-        'text="Formato de Tabela (.XLSX)"',
-        'text="Formato de Tabela (.xlsx)"',
-        'text="Formato de Tabela XLSX"',
-        'li:has-text("XLSX")',
-        'span:has-text("XLSX")'
-    ]
-    for ctx in [page, *page.frames]:
-        for sel in seletores_formato:
-            try:
-                loc = ctx.locator(sel).first
-                if loc.is_visible(timeout=500):
-                    loc.click()
-                    log.bind(etapa="download", tecnico=code).info(f"Clicou em formato XLSX via DOM ({sel})")
-                    clicou_formato = True
-                    break
-            except Exception:
-                continue
-        if clicou_formato:
-            break
-            
+    # Passo 15: Definir formato XLSX (Pular se já selecionado via DOM no Passo 14)
+    clicou_formato = clicou_tipo_dom
     if not clicou_formato:
-        clicou_formato = clicar_imagem(page, "15_clicar_Formato_de_Tabela_xlsx.png", timeout=15, threshold=0.65)
-        
+        seletores_formato = [
+            'text="Formato de Tabela (.XLSX)"',
+            'text="Formato de Tabela (.xlsx)"',
+            'text="Formato de Tabela XLSX"',
+            'li:has-text("XLSX")',
+            'span:has-text("XLSX")'
+        ]
+        for ctx in [page, *page.frames]:
+            for sel in seletores_formato:
+                try:
+                    loc = ctx.locator(sel).first
+                    if loc.is_visible(timeout=500):
+                        loc.click()
+                        log.bind(etapa="download", tecnico=code).info(f"Clicou em formato XLSX via DOM ({sel})")
+                        clicou_formato = True
+                        break
+                except Exception:
+                    continue
+            if clicou_formato:
+                break
+                
+        if not clicou_formato:
+            clicou_formato = clicar_imagem(page, "15_clicar_Formato_de_Tabela_xlsx.png", timeout=15, threshold=0.65)
+            
     if not clicou_formato:
         tirar_screenshot(page, etapa="falha_15_formato_xlsx", evidencia=True)
         raise DownloadError("Falha ao selecionar formato XLSX (15)")
         
     _time.sleep(1)
     
-    # Passo 16: Gerar relatório (Imprimir)
-    clicou_imprimir = False
-    seletores_imprimir = [
-        'button:has-text("Imprimir"):not([disabled])',
-        'button:has-text("Imprimir")',
-        '[title="Imprimir"]'
-    ]
-    for ctx in [page, *page.frames]:
-        for sel in seletores_imprimir:
-            try:
-                loc = ctx.locator(sel).last
-                if loc.is_visible(timeout=500):
-                    loc.click()
-                    log.bind(etapa="download", tecnico=code).info(f"Clicou em Imprimir via DOM ({sel})")
-                    clicou_imprimir = True
-                    break
-            except Exception:
-                continue
-        if clicou_imprimir:
-            break
-            
-    if not clicou_imprimir:
-        clicou_imprimir = clicar_imagem(page, "16_clicar_Imprimir.png", timeout=15, threshold=0.65)
-        
-    if not clicou_imprimir:
-        tirar_screenshot(page, etapa="falha_16_imprimir", evidencia=True)
-        raise DownloadError("Falha ao clicar em Imprimir (16)")
-        
-    _time.sleep(2)
-    
-    # Passo 17: Confirmar download (Sim) e capturar arquivo
-    log.bind(etapa="download", tecnico=code).info("Aguardando evento de download (timeout 60s)...")
+    # Passo 16 e 17: Gerar relatório (Imprimir) e Confirmar download (Sim)
+    log.bind(etapa="download", tecnico=code).info("Aguardando evento de download (Imprimir + Sim)...")
     try:
         with page.expect_download(timeout=settings.DOWNLOAD_TIMEOUT_S * 1000) as download_info:
+            clicou_imprimir = False
+            seletores_imprimir = [
+                'button:has-text("Imprimir"):not([disabled])',
+                'button:has-text("Imprimir")',
+                '[title="Imprimir"]'
+            ]
+            for ctx in [page, *page.frames]:
+                for sel in seletores_imprimir:
+                    try:
+                        loc = ctx.locator(sel).last
+                        if loc.is_visible(timeout=500):
+                            loc.click()
+                            log.bind(etapa="download", tecnico=code).info(f"Clicou em Imprimir via DOM ({sel})")
+                            clicou_imprimir = True
+                            break
+                    except Exception:
+                        continue
+                if clicou_imprimir:
+                    break
+                    
+            if not clicou_imprimir:
+                clicou_imprimir = clicar_imagem(page, "16_clicar_Imprimir.png", timeout=15, threshold=0.65)
+                
+            if not clicou_imprimir:
+                tirar_screenshot(page, etapa="falha_16_imprimir", evidencia=True)
+                raise DownloadError("Falha ao clicar em Imprimir (16)")
+                
+            _time.sleep(2)
+            
             clicou_sim = False
+            
+            # Estratégia 1: Procurar botões "Sim"
             seletores_sim = [
                 'button:has-text("Sim"):not([disabled])',
-                'button:has-text("Sim")'
+                'button:has-text("Sim")',
+                'div[role="button"]:has-text("Sim")'
             ]
             for ctx in [page, *page.frames]:
                 for sel in seletores_sim:
@@ -709,17 +736,36 @@ def _executar_download(page: Page, code: str, name: str) -> dict:
                             break
                     except Exception:
                         continue
-                if clicou_sim:
-                    break
+                if clicou_sim: break
+                
+                # Estratégia 2: Procurar select com "Sim" (Heurística da inspeção)
+                try:
+                    selects = ctx.locator("select").all()
+                    for sel in selects:
+                        if sel.is_visible(timeout=200):
+                            options = sel.locator("option").all()
+                            textos = [opt.inner_text().strip() for opt in options]
+                            if "Sim" in textos:
+                                sel.select_option(label="Sim")
+                                page.keyboard.press("Enter")
+                                log.bind(etapa="download", tecnico=code).info("Confirmou 'Sim' via select + Enter")
+                                clicou_sim = True
+                                break
+                except: continue
+                if clicou_sim: break
                     
             if not clicou_sim:
-                clicou_sim = clicar_imagem(page, "17_clique_Sim.png", timeout=15, threshold=0.65)
+                log.bind(etapa="download", tecnico=code).debug("Fallback para matching no botão Sim (pode ser opcional)")
+                clicou_sim = clicar_imagem(page, "17_clique_Sim.png", timeout=3, threshold=0.65)
                 
             if not clicou_sim:
-                tirar_screenshot(page, etapa="falha_17_sim", evidencia=True)
-                raise DownloadError("Falha ao clicar em Sim (17)")
+                log.bind(etapa="download", tecnico=code).debug("Passo 17 (Sim) não localizado, assumindo que o download já iniciou via Imprimir")
+                
         download = download_info.value
     except Exception as e:
+        # Se falhou mas o arquivo já existe no dir de downloads (caso o download tenha disparado mas o Playwright perdeu o evento)
+        # vamos verificar se houve sucesso apesar da exceção no bloco 'with'
+        log.bind(etapa="download", tecnico=code).warning(f"Exceção no Passo 16/17: {e}")
         tirar_screenshot(page, etapa="falha_download_timeout", evidencia=True)
         raise DownloadError(f"Timeout ou falha ao aguardar download: {e}")
         

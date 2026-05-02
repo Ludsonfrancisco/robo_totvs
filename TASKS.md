@@ -42,7 +42,7 @@
 - [x] **Validação OCR opcional do `name`** (PRD F3 passo 3): se o JSON traz `name`, OCR na região do nome retornado + comparação fuzzy via `rapidfuzz`. Mismatch → log warning, não bloqueia.
 - [x] Espera retorno automático à home (passo 18, sleep 7s — exceção documentada em PRD §13.8)
 - [x] Recovery: se sistema não retornar à home em 15s → forçar via Esc/Voltar
-- [ ] Demo: 1 XLSX baixado, validado, organizado em `downloads/AAAA-MM-DD/`
+- [x] Demo: 1 XLSX baixado, validado, organizado em `downloads/AAAA-MM-DD/`
 
 ### Sprint 5 — Loop pela Lista JSON + Checkpoint
 **Objetivo:** processar lista com idempotência.
