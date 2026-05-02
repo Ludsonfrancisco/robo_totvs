@@ -148,6 +148,7 @@ def aguardar_imagem(
 
     Retorna (x, y) do centro do match, ou None em timeout.
     """
+    global _falhas_consecutivas
     template_path = _resolver_caminho(referencia)
     template = cv2.imread(str(template_path), cv2.IMREAD_COLOR)
     if template is None:
@@ -166,7 +167,6 @@ def aguardar_imagem(
             log.bind(etapa="visao").debug(
                 f"match {referencia} score={score:.3f} ponto={ponto} (tentativa {tentativa})"
             )
-            global _falhas_consecutivas
             _falhas_consecutivas = 0
             return ponto
         diagn = _localizar(screenshot, template_match, offset, threshold=0.0)
@@ -179,7 +179,6 @@ def aguardar_imagem(
         f"(melhor score visto: {melhor_score:.3f}, threshold {threshold:.2f})"
     )
 
-    global _falhas_consecutivas
     _falhas_consecutivas += 1
     if _falhas_consecutivas >= LIMITE_FALHAS_CONTEXTO:
         try:

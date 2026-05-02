@@ -34,6 +34,19 @@ Decidimos por uma abordagem em três camadas:
 *   **Checkpoint System**: Criamos um sistema de persistência em JSON (`state/checkpoint.json`). Se o robô cair no meio de uma lista de 100 técnicos, ele sabe exatamente de onde parou ao ser reiniciado.
 *   **Validação de Lista**: Implementamos o filtro por `status == "Ativo"` e a carga dinâmica do `technicians.json`.
 
+### Sprint 6: Sessão e Resiliência de Longo Prazo
+*   **Gestão de Sessão**: Implementamos detecção automática de logout e re-login. O robô agora monitora a URL e a presença de elementos de login para garantir que execuções longas não expirem.
+*   **Recuperação de Erros**: Refinamos o sistema de `Esc` e navegação de retorno para que o robô consiga se "limpar" após um erro e continuar para o próximo técnico sem intervenção humana.
+
+### Sprint 7: Validação e Polish
+*   **Refinamento do Matching**: Ajuste de thresholds de imagem para lidar com variações sutis de renderização no Canvas.
+*   **Limpeza de Código**: Centralização de configurações e logs para facilitar a manutenção futura.
+
+### Sprint 8: Integração com Pipeline de Dados (Produção)
+*   **Arquitetura Centralizada**: Migramos a saída de dados para `~/Documents/projects/data_pipeline/robo_totvs/entrada/`. O robô agora entrega arquivos diretamente onde o time de BI consome.
+*   **UUID e Unicidade**: Alteramos a nomenclatura de arquivos para UUID v4. Isso remove a dependência de nomes de técnicos no sistema de arquivos e garante que cada arquivo gerado seja único, evitando colisões em re-processamentos.
+*   **Estrutura Temporal**: Implementamos a criação dinâmica de subpastas datadas dentro do pipeline para facilitar a orquestração do processamento de dados por dia.
+
 ## 3. Principais Decisões Técnicas
 
 | Desafio | Solução Adotada | Por quê? |
@@ -42,14 +55,16 @@ Decidimos por uma abordagem em três camadas:
 | **Lentidão do Protheus** | Polling de Imagem + Retry Exponencial | Evita o uso de `sleep()` fixos e torna o robô mais rápido em dias que o sistema está bom. |
 | **Identificação do IFrame** | Busca por Input Name | IDs de Iframes mudam a cada sessão; procurar pelo nome do campo de input é infalível. |
 | **Validação de Sucesso** | OCR + ZIP Check | Garantir que o conteúdo do download corresponde ao técnico filtrado. |
+| **Integração de Dados** | Saída UUID em Dir Central | Facilita a ingestão por pipelines de BI e remove caminhos relativos frágeis. |
 
 ## 4. Estado Atual
 O robô é capaz de:
 1.  Fazer login de forma resiliente.
 2.  Navegar até a rotina de estoque.
-3.  Processar uma lista inteira de técnicos.
-4.  Recuperar de falhas individuais sem abortar a execução total.
-5.  Gerar evidências visuais (screenshots) de cada erro para depuração.
+3.  Processar uma lista inteira de técnicos com persistência de estado.
+4.  Recuperar de falhas individuais e de sessão.
+5.  Entregar arquivos prontos para produção em estrutura de pipeline de dados.
+6.  Gerar evidências visuais (screenshots) de cada erro para depuração.
 
 ---
 *Documento atualizado em: 02 de Maio de 2026*

@@ -2,9 +2,9 @@
 
 > **Documento de requisitos do produto (PRD)**
 > Fonte única de verdade. Toda decisão técnica, sprint ou prompt subsequente deve referenciar este arquivo.
-> **Versão:** 1.5 — 2026-05-02
+> **Versão:** 1.6 — 2026-05-02
 > **Autor:** Ludson Francisco
-> **Status:** MVP Funcional (Sprints 1-5 Concluídas)
+> **Status:** Pronto para Produção (Sprints 1-8 Concluídas)
 
 ---
 
@@ -12,17 +12,17 @@
 
 **Nome:** robo-totvs (RPA Protheus — Estoque por Técnico)
 
-**Resumo (1 frase):** Robô em Python + Playwright que automatiza, no TOTVS Protheus WebApp, o download em XLSX do relatório "Material em Estoque por Técnico" para uma lista de técnicos definida em JSON.
+**Resumo (1 frase):** Robô em Python + Playwright que automatiza, no TOTVS Protheus WebApp, o download em XLSX do relatório "Material em Estoque por Técnico" para uma lista de técnicos definida em JSON, integrando-os a um pipeline de dados profissional.
 
 **Status Atual:**
-O projeto atingiu a maturidade do MVP, com os fluxos de login, navegação, download individual e processamento em lote (loop com checkpoint) totalmente implementados e validados. O robô já é capaz de realizar a operação ponta-a-ponta de forma resiliente.
+O projeto evoluiu do MVP para uma arquitetura de pipeline de dados. Os downloads não são mais locais ao projeto, mas enviados para uma estrutura centralizada no diretório do usuário, utilizando nomes únicos (UUID) para garantir integridade no processamento downstream.
 
 **Conquistas Técnicas Recentes:**
-1.  **Estabilização Visual**: Implementação de viewport fixa (1366x768) e multi-scale matching para garantir que o sistema de visão computacional funcione em diferentes ambientes.
-2.  **Navegação de IFrames**: Desenvolvimento de lógica recursiva para localizar elementos em frames dinâmicos do SmartClient HTML.
-3.  **Dropdown de Planilha**: Superação do bloqueio de cliques no Canvas através da manipulação direta do elemento `<select>` no DOM do IFrame, garantindo 100% de precisão na escolha do formato XLSX.
-4.  **Integridade do Download**: Interceptação nativa do evento de download pelo Playwright, seguida de validação de integridade (ZIP Check) e cálculo de hash SHA-256.
-5.  **Idempotência**: Sistema de checkpoint em JSON que permite retomar execuções interrompidas sem duplicar downloads.
+1.  **Arquitetura de Pipeline**: Migração dos downloads da pasta interna para `~/Documents/projects/data_pipeline/robo_totvs/entrada/`.
+2.  **Unicidade com UUID**: Implementação de nomes de arquivo baseados em UUID v4, eliminando colisões e facilitando a ingestão por ferramentas de ETL.
+3.  **Organização Temporal**: Criação automática de subpastas por data de execução (`AAAA-MM-DD`) dentro do pipeline.
+4.  **Estabilização Visual**: Implementação de viewport fixa (1366x768) e multi-scale matching.
+5.  **Idempotência**: Sistema de checkpoint em JSON que permite retomar execuções.
 
 **Problema que resolve:**
 A operação atual é 100% manual: o operador faz login no Protheus, navega até Favoritos → "Mat Estoque Por Tecnico", insere o código de cada técnico, escolhe o formato XLSX, clica em "Imprimir" e baixa o arquivo. Para uma lista com N técnicos, são ~10 cliques por item × N + erros humanos + tempo ocioso esperando o sistema responder. O Protheus WebApp roda em SmartClient HTML com uso intensivo de Canvas, IDs ofuscados e iFrames — o que dificulta automações tradicionais baseadas em DOM.
@@ -101,7 +101,7 @@ flowchart TB
     end
 
     subgraph Saida["Saída"]
-        DL["downloads/AAAA-MM-DD/"]
+        DL["~/Documents/projects/data_pipeline/.../entrada/AAAA-MM-DD/"]
         LOG["logs/run-AAAA-MM-DD.log"]
         EVID["logs/evidencias/*.png"]
     end
@@ -237,8 +237,8 @@ erDiagram
 
 ### 4.4 Saída — arquivos baixados
 
-- Diretório: `downloads/AAAA-MM-DD/` (cria automaticamente).
-- Convenção de nome: `{codigo}_{nome_normalizado}.xlsx` (ex.: `000123_JOAO_DA_SILVA.xlsx`).
+- Diretório: `~/Documents/projects/data_pipeline/robo_totvs/entrada/AAAA-MM-DD/` (cria automaticamente).
+- Convenção de nome: `{uuid4}.xlsx` (ex.: `e5ee3ba2-b1d2-4f13-8cfe-ffd1c2690257.xlsx`).
 - Validação pós-download: arquivo existe, `> 0 bytes`, extensão `.xlsx`, abre como ZIP válido (XLSX é ZIP).
 
 ---

@@ -601,6 +601,7 @@ def _executar_download(page: Page, code: str, name: str) -> dict:
     import unicodedata
     import hashlib
     import zipfile
+    import uuid
     from datetime import datetime
     from core.visao import validar_texto_ocr
     
@@ -841,18 +842,12 @@ def _executar_download(page: Page, code: str, name: str) -> dict:
         tirar_screenshot(page, etapa="falha_download_timeout", evidencia=True)
         raise DownloadError(f"Timeout ou falha ao aguardar download: {e}")
         
-    # Salvar e renomear o arquivo
+    # Salvar e renomear o arquivo para o pipeline (UUID) dentro de pasta datada
     hoje_str = datetime.now().strftime("%Y-%m-%d")
     downloads_dia_dir = settings.downloads_dir / hoje_str
     downloads_dia_dir.mkdir(parents=True, exist_ok=True)
     
-    # Normalizar nome (remover acentos, espaços -> underscores, tudo maiúsculo)
-    nome_norm = name if name else code
-    nome_norm = unicodedata.normalize('NFKD', nome_norm).encode('ASCII', 'ignore').decode('utf-8')
-    nome_norm = re.sub(r'[^A-Za-z0-9_]', '_', nome_norm).upper()
-    nome_norm = re.sub(r'_+', '_', nome_norm).strip('_')
-    
-    arquivo_nome = f"{code}_{nome_norm}.xlsx"
+    arquivo_nome = f"{uuid.uuid4()}.xlsx"
     arquivo_path = downloads_dia_dir / arquivo_nome
     
     download.save_as(arquivo_path)

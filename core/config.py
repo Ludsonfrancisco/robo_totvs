@@ -33,7 +33,7 @@ class Settings(BaseSettings):
 
     @property
     def downloads_dir(self) -> Path:
-        return PROJECT_ROOT / "downloads"
+        return Path.home() / "Documentos" / "projects" / "data_pipeline" / "robo_totvs" / "entrada"
 
     @property
     def logs_dir(self) -> Path:
