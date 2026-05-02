@@ -12,3 +12,4 @@ __pycache__/
 downloads/
 logs/
 state/
+.browser-profile/

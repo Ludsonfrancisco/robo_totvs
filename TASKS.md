@@ -55,6 +55,7 @@
 - [ ] Exit codes corretos (0 todos ok / 1 falhas parciais / 3 erro de config)
 - [ ] Demo: lista real de técnicos `Ativo` do `technicians.json` processada; re-execução pula sucessos
 
+
 ### Sprint 6 — Resiliência: Sessão e Erros
 **Objetivo:** sobrevive a logout, timeouts e estados inesperados.
 - [ ] Detecção de logout via template match da tela de login (referências `03`/`04`/`05`)

@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     VIEWPORT_H: int = 768
     DOWNLOAD_TIMEOUT_S: int = 60
     TECNICOS_JSON: str = "technicians.json"
+    BROWSER_CHANNEL: str = "chrome"
+    BROWSER_USER_DATA_DIR: str = ".browser-profile/protheus"
 
     @property
     def tecnicos_path(self) -> Path:
@@ -44,6 +46,11 @@ class Settings(BaseSettings):
     @property
     def referencias_dir(self) -> Path:
         return PROJECT_ROOT / "referencias"
+
+    @property
+    def browser_user_data_dir(self) -> Path:
+        p = Path(self.BROWSER_USER_DATA_DIR).expanduser()
+        return p if p.is_absolute() else PROJECT_ROOT / p
 
 
 settings = Settings()

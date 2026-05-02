@@ -406,36 +406,48 @@ def _executar_navegacao_rotina(page: Page) -> None:
 
     _time.sleep(3)
     
-    # Passo 09: Confirmar tela
-    log.bind(etapa="navegacao").info("Aguardando e clicando em Confirmar (09)...")
+    # Passo 09: Confirmar tela "TOTVS Linha Protheus" (Data base/Grupo/Filial/Ambiente).
+    # OPCIONAL: o Protheus pula este diálogo quando o profile do Chrome já tem
+    # essas escolhas memorizadas (efeito do launch_persistent_context).
+    # Probe curto; se não aparecer, segue.
+    log.bind(etapa="navegacao").info("Verificando diálogo Confirmar (09)...")
     clicou_conf = False
     seletores_conf = [
         'button:has-text("Confirmar"):not([disabled])',
         'button:has-text("Confirmar")',
         '[title="Confirmar"]'
     ]
-    for ctx in [page, *page.frames]:
-        for sel in seletores_conf:
-            try:
-                loc = ctx.locator(sel).first
-                if loc.is_visible(timeout=500):
-                    loc.click()
-                    log.bind(etapa="navegacao").info(f"Clicou em Confirmar via DOM ({sel})")
-                    clicou_conf = True
-                    break
-            except Exception:
-                continue
-        if clicou_conf:
-            break
-            
-    if not clicou_conf:
-        clicou_conf = clicar_imagem(page, "09_clicar_confirmar.png", timeout=15, threshold=0.65)
-        
-    if not clicou_conf:
-        tirar_screenshot(page, etapa="falha_09_confirmar", evidencia=True)
-        raise NavegacaoError("Passo 09: Falha ao clicar em Confirmar")
+    deadline_conf = _time.monotonic() + 4
+    while _time.monotonic() < deadline_conf and not clicou_conf:
+        for ctx in [page, *page.frames]:
+            for sel in seletores_conf:
+                try:
+                    loc = ctx.locator(sel).first
+                    if loc.is_visible(timeout=300):
+                        loc.click()
+                        log.bind(etapa="navegacao").info(f"Clicou em Confirmar via DOM ({sel})")
+                        clicou_conf = True
+                        break
+                except Exception:
+                    continue
+            if clicou_conf:
+                break
+        if not clicou_conf:
+            _time.sleep(0.4)
 
-    _time.sleep(3)
+    if not clicou_conf:
+        centro = aguardar_imagem(page, "09_clicar_confirmar.png", timeout=2, threshold=0.65)
+        if centro is not None:
+            page.mouse.click(*centro)
+            log.bind(etapa="navegacao").info(f"Clicou em Confirmar via matching em {centro}")
+            clicou_conf = True
+
+    if clicou_conf:
+        _time.sleep(3)
+    else:
+        log.bind(etapa="navegacao").debug(
+            "Passo 09 não apareceu — profile persistente já memorizou Grupo/Filial/Ambiente. Seguindo."
+        )
 
     # Passo 10: Popup opcional "Não exibir nos próximos 7 dias"
     log.bind(etapa="navegacao").info("Verificando popup 7 dias (10)...")

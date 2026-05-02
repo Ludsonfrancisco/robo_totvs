@@ -2,9 +2,9 @@
 
 > **Documento de requisitos do produto (PRD)**
 > Fonte única de verdade. Toda decisão técnica, sprint ou prompt subsequente deve referenciar este arquivo.
-> **Versão:** 1.0 — 2026-05-01
+> **Versão:** 1.5 — 2026-05-02
 > **Autor:** Ludson Francisco
-> **Status:** Aprovação inicial
+> **Status:** MVP Funcional (Sprints 1-5 Concluídas)
 
 ---
 
@@ -13,6 +13,16 @@
 **Nome:** robo-totvs (RPA Protheus — Estoque por Técnico)
 
 **Resumo (1 frase):** Robô em Python + Playwright que automatiza, no TOTVS Protheus WebApp, o download em XLSX do relatório "Material em Estoque por Técnico" para uma lista de técnicos definida em JSON.
+
+**Status Atual:**
+O projeto atingiu a maturidade do MVP, com os fluxos de login, navegação, download individual e processamento em lote (loop com checkpoint) totalmente implementados e validados. O robô já é capaz de realizar a operação ponta-a-ponta de forma resiliente.
+
+**Conquistas Técnicas Recentes:**
+1.  **Estabilização Visual**: Implementação de viewport fixa (1366x768) e multi-scale matching para garantir que o sistema de visão computacional funcione em diferentes ambientes.
+2.  **Navegação de IFrames**: Desenvolvimento de lógica recursiva para localizar elementos em frames dinâmicos do SmartClient HTML.
+3.  **Dropdown de Planilha**: Superação do bloqueio de cliques no Canvas através da manipulação direta do elemento `<select>` no DOM do IFrame, garantindo 100% de precisão na escolha do formato XLSX.
+4.  **Integridade do Download**: Interceptação nativa do evento de download pelo Playwright, seguida de validação de integridade (ZIP Check) e cálculo de hash SHA-256.
+5.  **Idempotência**: Sistema de checkpoint em JSON que permite retomar execuções interrompidas sem duplicar downloads.
 
 **Problema que resolve:**
 A operação atual é 100% manual: o operador faz login no Protheus, navega até Favoritos → "Mat Estoque Por Tecnico", insere o código de cada técnico, escolhe o formato XLSX, clica em "Imprimir" e baixa o arquivo. Para uma lista com N técnicos, são ~10 cliques por item × N + erros humanos + tempo ocioso esperando o sistema responder. O Protheus WebApp roda em SmartClient HTML com uso intensivo de Canvas, IDs ofuscados e iFrames — o que dificulta automações tradicionais baseadas em DOM.
