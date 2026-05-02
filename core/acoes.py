@@ -315,6 +315,53 @@ def _executar_login(page: Page) -> None:
     )
 
 
+def detectar_logout(page: Page) -> bool:
+    """Detecta se a sessão expirou ou foi encerrada.
+    
+    Heurística: Verifica se algum elemento da tela de login (passos 03/04/05) está visível.
+    """
+    log.bind(etapa="sessao").debug("Verificando se houve logout...")
+    
+    # 1. Tenta via DOM (mais rápido)
+    for ctx in [page, *page.frames]:
+        try:
+            if ctx.locator('input[name="login"]').first.is_visible(timeout=500):
+                log.bind(etapa="sessao").warning("Logout detectado via DOM (campo login visível)")
+                return True
+            if ctx.locator('input[name="password"]').first.is_visible(timeout=500):
+                log.bind(etapa="sessao").warning("Logout detectado via DOM (campo password visível)")
+                return True
+        except Exception:
+            continue
+            
+    # 2. Tenta via template matching (fallback)
+    if aguardar_imagem(page, "03_insira_usuario.png", timeout=2, threshold=0.5) is not None:
+        log.bind(etapa="sessao").warning("Logout detectado via matching (campo usuário)")
+        return True
+        
+    return False
+
+def validar_esta_na_home(page: Page) -> bool:
+    """Verifica se o navegador está na home ou na tela de favoritos."""
+    seletores_home = [
+        'text="Favoritos"',
+        '[aria-label="Favoritos"]',
+        'po-menu',
+        'wa-menu',
+    ]
+    for ctx in [page, *page.frames]:
+        for sel in seletores_home:
+            try:
+                if ctx.locator(sel).first.is_visible(timeout=500):
+                    return True
+            except Exception:
+                continue
+    
+    if aguardar_imagem(page, "07_pagina_home_clicar_favoritos.png", timeout=2) is not None:
+        return True
+        
+    return False
+
 def fazer_login(page: Page) -> None:
     """Executa login com retry (3x, backoff exponencial).
 
@@ -349,39 +396,52 @@ class NavegacaoError(Exception):
 def _executar_navegacao_rotina(page: Page) -> None:
     import time as _time
     
-    # Passo 07: Abrir favoritos
-    log.bind(etapa="navegacao").info("Aguardando e clicando em Favoritos (07)...")
-    clicou_fav = False
-    seletores_fav = [
-        '[title="Favoritos"]',
-        'text="Favoritos"',
-        '[aria-label="Favoritos"]',
-        '.wa-menu-item:has-text("Favoritos")',
-        'po-menu-item:has-text("Favoritos")',
-        'a:has-text("Favoritos")'
-    ]
+    # Heurística: Checa se o relatório já está visível (menu já pode estar aberto)
+    log.bind(etapa="navegacao").info("Verificando se Mat Estoque Por Tecnico já está visível...")
+    ja_visivel = False
     for ctx in [page, *page.frames]:
-        for sel in seletores_fav:
-            try:
-                loc = ctx.locator(sel).first
-                if loc.is_visible(timeout=500):
-                    loc.click()
-                    log.bind(etapa="navegacao").info(f"Clicou em Favoritos via DOM ({sel})")
-                    clicou_fav = True
-                    break
-            except Exception:
-                continue
-        if clicou_fav:
-            break
+        try:
+            if ctx.locator('text="Mat Estoque Por Tecnico"').first.is_visible(timeout=500):
+                ja_visivel = True
+                log.bind(etapa="navegacao").info("Relatório já visível, pulando clique em Favoritos")
+                break
+        except Exception:
+            pass
+
+    if not ja_visivel:
+        # Passo 07: Abrir favoritos
+        log.bind(etapa="navegacao").info("Aguardando e clicando em Favoritos (07)...")
+        clicou_fav = False
+        seletores_fav = [
+            '[title="Favoritos"]',
+            'text="Favoritos"',
+            '[aria-label="Favoritos"]',
+            '.wa-menu-item:has-text("Favoritos")',
+            'po-menu-item:has-text("Favoritos")',
+            'a:has-text("Favoritos")'
+        ]
+        for ctx in [page, *page.frames]:
+            for sel in seletores_fav:
+                try:
+                    loc = ctx.locator(sel).first
+                    if loc.is_visible(timeout=500):
+                        loc.click()
+                        log.bind(etapa="navegacao").info(f"Clicou em Favoritos via DOM ({sel})")
+                        clicou_fav = True
+                        break
+                except Exception:
+                    continue
+            if clicou_fav:
+                break
+                
+        if not clicou_fav:
+            clicou_fav = clicar_imagem(page, "07_pagina_home_clicar_favoritos.png", timeout=15, threshold=0.65)
             
-    if not clicou_fav:
-        clicou_fav = clicar_imagem(page, "07_pagina_home_clicar_favoritos.png", timeout=15, threshold=0.65)
-        
-    if not clicou_fav:
-        tirar_screenshot(page, etapa="falha_07_favoritos", evidencia=True)
-        raise NavegacaoError("Passo 07: Falha ao clicar em Favoritos")
-        
-    _time.sleep(2) # Aguarda animação do menu
+        if not clicou_fav:
+            tirar_screenshot(page, etapa="falha_07_favoritos", evidencia=True)
+            raise NavegacaoError("Passo 07: Falha ao clicar em Favoritos")
+            
+        _time.sleep(2) # Aguarda animação do menu
     
     # Passo 08: Abrir relatório
     log.bind(etapa="navegacao").info("Aguardando e clicando em Mat Estoque Por Tecnico (08)...")
@@ -837,15 +897,18 @@ def _executar_download(page: Page, code: str, name: str) -> dict:
     }
 
 def baixar_xlsx_tecnico(page: Page, code: str, name: str = "") -> dict:
-    """Orquestra o download para um técnico. Recupera com reload em caso de falha."""
+    """Orquestra o download para um técnico.
+
+    Em caso de falha NÃO faz `page.goto(PROTHEUS_URL)` — isso jogaria a página
+    de volta na tela de login e destruiria a sessão, quebrando o próximo técnico
+    do loop. A recuperação de tela (voltar à rotina) é responsabilidade do
+    orquestrador em `flows/processar_lista.py::_preparar_para_proximo`.
+    """
     try:
         return _executar_download(page, code, name)
     except RetryError as e:
         log.bind(etapa="download", tecnico=code).error(f"Download falhou após retries: {e}")
-        # Retorna para a home p/ estado limpo para o próximo técnico
-        page.goto(settings.PROTHEUS_URL, wait_until="domcontentloaded")
         raise DownloadError(str(e)) from e
     except DownloadError as e:
         log.bind(etapa="download", tecnico=code).error(f"Download falhou: {e}")
-        page.goto(settings.PROTHEUS_URL, wait_until="domcontentloaded")
         raise

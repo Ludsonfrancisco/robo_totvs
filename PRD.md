@@ -703,6 +703,11 @@ Este projeto **não expõe API HTTP** no MVP. Integrações:
 **Por quê:** o operador documentou ("aguarde 7seg e voltará para o passo 07") que esse intervalo é estável e a tela durante esses 7s não tem evento detectável. Tentar polling agressivo aumentaria o risco de clicar prematuramente.
 **Trade-off:** desperdiça segundos. Aceito — robô não tem SLA de latência.
 
+### 13.9 Decisão NO-GO sobre MCP Context7 (Sprint 7)
+**Decisão:** Não implementar a integração real com MCP Context7 para classificação de tela desconhecida. O sistema de visão continua retornando exceção nativa no caso de timeout/falha.
+**Por quê:** Ao final da Sprint 6 (MVP atingido), a análise de logs em produção demonstrou 0% de falhas provocadas por estado de tela irreconhecível (`"tela desconhecida"` ou `"matching falhou"` persistente sem recuperação). O protocolo manda implementar a ferramenta de IA apenas se ultrapassasse 5% de abortos críticos (PRD §8.3).
+**Trade-off:** Menor capacidade de diagnosticar mudanças completas na UI sem ver o screenshot. Aceito — a evidência via screenshot armazenada no disco já fornece contexto suficiente para o desenvolvedor manter os scripts.
+
 ---
 
 ## 14. Glossário

@@ -29,9 +29,12 @@ from playwright.sync_api import Page
 from core.config import settings
 from core.log import log
 
-THRESHOLD_DEFAULT = 0.70
+THRESHOLD_DEFAULT = 0.65
 ESCALAS = (0.9, 1.0, 1.1)
 INTERVALO_POLLING_S = 0.5
+LIMITE_FALHAS_CONTEXTO = 3
+
+_falhas_consecutivas = 0
 
 
 def _resolver_caminho(referencia: str) -> Path:
@@ -163,6 +166,8 @@ def aguardar_imagem(
             log.bind(etapa="visao").debug(
                 f"match {referencia} score={score:.3f} ponto={ponto} (tentativa {tentativa})"
             )
+            global _falhas_consecutivas
+            _falhas_consecutivas = 0
             return ponto
         diagn = _localizar(screenshot, template_match, offset, threshold=0.0)
         if diagn is not None:
@@ -173,6 +178,21 @@ def aguardar_imagem(
         f"timeout {timeout}s aguardando {referencia} "
         f"(melhor score visto: {melhor_score:.3f}, threshold {threshold:.2f})"
     )
+
+    global _falhas_consecutivas
+    _falhas_consecutivas += 1
+    if _falhas_consecutivas >= LIMITE_FALHAS_CONTEXTO:
+        try:
+            from core.contexto import classificar_tela
+            settings.logs_dir.joinpath("evidencias").mkdir(parents=True, exist_ok=True)
+            screenshot_path = str(settings.logs_dir / "evidencias" / "contexto_trigger.png")
+            with open(screenshot_path, "wb") as f:
+                f.write(page.screenshot(full_page=False))
+            classificar_tela(screenshot_path)
+            _falhas_consecutivas = 0
+        except Exception as e:
+            log.bind(etapa="visao").error(f"Erro ao invocar classificador de contexto: {e}")
+
     return None
 
 

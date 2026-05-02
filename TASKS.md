@@ -46,39 +46,39 @@
 
 ### Sprint 5 — Loop pela Lista JSON + Checkpoint
 **Objetivo:** processar lista com idempotência.
-- [ ] **Schema pydantic do `technicians.json`** com campos `code` (obrigatório), `name`, `login`, `status`, `email` (todos opcionais) — PRD §4.2
-- [ ] **Filtro padrão `status == "Ativo"`** ao carregar a lista; flag `--incluir-desligados` para override
-- [ ] `core/estado.py` com `salvar_checkpoint()` / `carregar_checkpoint()` — escrita atômica (write-to-temp + rename, PRD §13.5)
-- [ ] Checkpoint grava `code`, `status`, `tentativas`, `arquivo`, `hash_sha256`, `erro_msg`
-- [ ] `flows/processar_lista.py` orquestrador completo — itera, atualiza checkpoint após cada técnico
-- [ ] Flag `--retry-falhos` (reprocessa apenas `status=falhou` do checkpoint atual)
-- [ ] Exit codes corretos (0 todos ok / 1 falhas parciais / 3 erro de config)
-- [ ] Demo: lista real de técnicos `Ativo` do `technicians.json` processada; re-execução pula sucessos
+- [x] **Schema pydantic do `technicians.json`** com campos `code` (obrigatório), `name`, `login`, `status`, `email` (todos opcionais) — PRD §4.2
+- [x] **Filtro padrão `status == "Ativo"`** ao carregar a lista; flag `--incluir-desligados` para override
+- [x] `core/estado.py` com `salvar_checkpoint()` / `carregar_checkpoint()` — escrita atômica (write-to-temp + rename, PRD §13.5)
+- [x] Checkpoint grava `code`, `status`, `tentativas`, `arquivo`, `hash_sha256`, `erro_msg`
+- [x] `flows/processar_lista.py` orquestrador completo — itera, atualiza checkpoint após cada técnico
+- [x] Flag `--retry-falhos` (reprocessa apenas `status=falhou` do checkpoint atual)
+- [x] Exit codes corretos (0 todos ok / 1 falhas parciais / 3 erro de config)
+- [x] Demo: lista real de técnicos `Ativo` do `technicians.json` processada; re-execução pula sucessos
 
 
 ### Sprint 6 — Resiliência: Sessão e Erros
 **Objetivo:** sobrevive a logout, timeouts e estados inesperados.
-- [ ] Detecção de logout via template match da tela de login (referências `03`/`04`/`05`)
-- [ ] Re-login automático com retomada do técnico atual
-- [ ] **Contador global de re-logins por execução; ao atingir 3 → aborta com exit code 2** (PRD F5 — proteção contra loop infinito)
-- [ ] Screenshot automático em toda falha → `logs/evidencias/<timestamp>_<etapa>.png`
-- [ ] Validação pré-técnico: confirmar via screenshot que está na home/favoritos antes de iniciar F3
-- [ ] Resumo final colorido no console (verde sucesso / amarelo warning / vermelho erro)
-- [ ] Demo: forçar logout no meio da execução; robô recupera sozinho. Forçar 3 logouts seguidos; robô aborta com exit 2.
+- [x] Detecção de logout via template match da tela de login (referências `03`/`04`/`05`)
+- [x] Re-login automático com retomada do técnico atual
+- [x] **Contador global de re-logins por execução; ao atingir 3 → aborta com exit code 2** (PRD F5 — proteção contra loop infinito)
+- [x] Screenshot automático em toda falha → `logs/evidencias/<timestamp>_<etapa>.png`
+- [x] Validação pré-técnico: confirmar via screenshot que está na home/favoritos antes de iniciar F3
+- [x] Resumo final colorido no console (verde sucesso / amarelo warning / vermelho erro)
+- [x] Demo: forçar logout no meio da execução; robô recupera sozinho. Forçar 3 logouts seguidos; robô aborta com exit 2.
 
 ### Sprint 7 — (Opcional) MCP Context7
 **Objetivo:** classificador de tela quando matching falha.
-- [ ] `core/contexto.py::classificar_tela()` (stub primeiro)
-- [ ] Integração real com servidor MCP Context7
-- [ ] Acionado apenas após N falhas de matching
-- [ ] Decisão go/no-go ao final da Sprint 6 com base em métricas reais
+- [x] `core/contexto.py::classificar_tela()` (stub primeiro)
+- [x] Integração real com servidor MCP Context7 *(Cancelado: No-Go baseado em métricas)*
+- [x] Acionado apenas após N falhas de matching *(Cancelado: No-Go baseado em métricas)*
+- [x] Decisão go/no-go ao final da Sprint 6 com base em métricas reais *(Decisão: NO-GO, 0% de falhas por "tela desconhecida" nos logs)*
 
 ### Sprint 8 — Refinamento
 **Objetivo:** pronto para produção diária.
-- [ ] Rotação de logs (10MB / 5 arquivos)
-- [ ] README completo (setup, troubleshooting, FAQ)
-- [ ] Script de instalação (`install.sh`)
-- [ ] Ajuste de thresholds de matching com base em histórico
-- [ ] Limpeza de TODOs e dead code
+- [x] Rotação de logs (10MB / 5 arquivos)
+- [x] README completo (setup, troubleshooting, FAQ)
+- [x] Script de instalação (`install.sh`)
+- [x] Ajuste de thresholds de matching com base em histórico
+- [x] Limpeza de TODOs e dead code
 
 ---

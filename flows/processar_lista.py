@@ -1,81 +1,269 @@
 import json
+import time
 from pathlib import Path
 
 from playwright.sync_api import Page
 
 from core.config import settings
 from core.schema import Tecnico, CheckpointItem
-from core.estado import carregar_checkpoint, salvar_checkpoint
-from core.acoes import baixar_xlsx_tecnico, CredenciaisInvalidasError
+from core.estado import carregar_checkpoint, salvar_checkpoint, Checkpoint
+from core.acoes import (
+    baixar_xlsx_tecnico,
+    navegar_ate_rotina,
+    fazer_login,
+    detectar_logout,
+    validar_esta_na_home,
+    CredenciaisInvalidasError,
+    NavegacaoError,
+)
 from core.log import log
+from core.visao import aguardar_imagem
+from core.navegador import tirar_screenshot
+
 
 def carregar_tecnicos(incluir_desligados: bool = False) -> list[Tecnico]:
     path = settings.tecnicos_path
     if not path.exists():
         log.bind(etapa="processar_lista").error(f"Arquivo de técnicos não encontrado: {path}")
         raise FileNotFoundError(f"Arquivo {path} não existe")
-    
+
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    
+
     tecnicos = [Tecnico(**item) for item in data]
-    
+
     if not incluir_desligados:
         tecnicos = [t for t in tecnicos if t.status == "Ativo"]
-        
+
     return tecnicos
 
-def processar_lista(page: Page, incluir_desligados: bool = False, retry_falhos: bool = False) -> int:
+
+def _imprimir_resumo(total: int, sucesso: int, falha: int, pulados: int, duracao_s: float) -> None:
+    """Imprime resumo final formatado (PRD §10.1)."""
+    minutos, segundos = divmod(int(duracao_s), 60)
+    logger = log.bind(etapa="resumo")
+    logger.info("═" * 51)
+    
+    msg = f"RESUMO  total: {total}  sucesso: {sucesso}  falha: {falha}  pulados: {pulados}"
+    if falha == 0 and sucesso > 0:
+        logger.success(msg)
+    elif falha > 0 and sucesso > 0:
+        logger.warning(msg)
+    elif falha > 0:
+        logger.error(msg)
+    else:
+        logger.info(msg)
+        
+    logger.info(f"duração: {minutos:02d}:{segundos:02d}")
+    logger.info("═" * 51)
+
+
+def _preparar_para_proximo(page: Page, code_anterior: str) -> bool:
+    """Garante que a página está na tela de filtro (campo 11) pronta para o próximo técnico.
+
+    Estados possíveis após terminar um técnico (sucesso ou falha):
+    - Já na tela de filtro (caminho feliz pós-sucesso): segue.
+    - Modal/erro residual aberto: Esc até cair em estado conhecido.
+    - Na home (Favoritos visível): re-navega via `navegar_ate_rotina`.
+
+    Retorna True se a tela está pronta, False se não conseguiu recuperar
+    (nesse caso o orquestrador deve abortar o restante do loop).
+    """
+    # 1. Caminho feliz: já estamos no campo 11 (Protheus auto-retornou após Imprimir).
+    if aguardar_imagem(page, "11_colocar_o_codigo_tecnico.png", timeout=5, threshold=0.65) is not None:
+        log.bind(etapa="recuperacao", tecnico=code_anterior).info(
+            "Tela da rotina pronta para o próximo técnico"
+        )
+        return True
+
+    # 2. Pode haver modal/diálogo residual de uma falha — Esc para tentar fechar.
+    log.bind(etapa="recuperacao", tecnico=code_anterior).info(
+        "Tela da rotina não detectada — pressionando Esc para limpar estado residual"
+    )
+    for _ in range(3):
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+        time.sleep(1)
+
+    # Re-checar campo 11 após Esc.
+    if aguardar_imagem(page, "11_colocar_o_codigo_tecnico.png", timeout=3, threshold=0.65) is not None:
+        log.bind(etapa="recuperacao", tecnico=code_anterior).info("Recuperado para tela de filtro via Esc")
+        return True
+
+    # 3. Verifica se caímos na home (Favoritos visível ou logo Protheus) — daí re-navega.
+    home_visivel = False
+    try:
+        seletores_home = ['text="Favoritos"', '[title="Favoritos"]', '.wa-menu-item', 'po-menu']
+        for ctx in [page, *page.frames]:
+            for sel in seletores_home:
+                try:
+                    if ctx.locator(sel).first.is_visible(timeout=1000):
+                        home_visivel = True
+                        break
+                except Exception:
+                    continue
+            if home_visivel:
+                break
+    except Exception:
+        pass
+
+    if not home_visivel:
+        # Fallback para matching da home
+        if aguardar_imagem(page, "07_pagina_home_clicar_favoritos.png", timeout=5) is not None:
+            home_visivel = True
+
+    if home_visivel:
+        log.bind(etapa="recuperacao", tecnico=code_anterior).info(
+            "Detectada home ou estado inicial — re-navegando até a rotina"
+        )
+        try:
+            navegar_ate_rotina(page)
+            return True
+        except NavegacaoError as e:
+            log.bind(etapa="recuperacao", tecnico=code_anterior).error(
+                f"Falha ao re-navegar da home: {e}"
+            )
+            return False
+
+    log.bind(etapa="recuperacao", tecnico=code_anterior).error(
+        "Estado desconhecido — não foi possível recuperar para o próximo técnico"
+    )
+    return False
+
+
+def processar_lista(
+    page: Page,
+    incluir_desligados: bool = False,
+    retry_falhos: bool = False,
+    reset: bool = False,
+    limite: int | None = None,
+) -> int:
+    """Itera technicians.json, processa cada um, atualiza checkpoint após cada técnico.
+
+    Args:
+        limite: se informado, processa apenas os primeiros N técnicos elegíveis
+            (útil para demos curtos da Sprint 5 sem percorrer a lista inteira).
+
+    Retorna exit code:
+      0 — todos os técnicos elegíveis terminaram com sucesso
+      1 — pelo menos um técnico falhou nesta execução
+    """
+    inicio = time.monotonic()
     tecnicos = carregar_tecnicos(incluir_desligados)
-    checkpoint = carregar_checkpoint()
+    if limite is not None and limite > 0:
+        log.bind(etapa="processar_lista").info(
+            f"Aplicando --limite={limite} (de {len(tecnicos)} elegíveis)"
+        )
+        tecnicos = tecnicos[:limite]
     
-    falhas = 0
-    processados_agora = 0
-    
-    log.bind(etapa="processar_lista").info(f"Total de técnicos na lista: {len(tecnicos)}")
-    
-    for t in tecnicos:
+    if reset:
+        log.bind(etapa="processar_lista").info("Flag --reset ativa: ignorando checkpoint anterior.")
+        checkpoint = Checkpoint()
+    else:
+        checkpoint = carregar_checkpoint()
+
+    total = len(tecnicos)
+    sucesso = 0
+    falha = 0
+    pulados = 0
+    relogins = 0
+
+    log.bind(etapa="processar_lista").info(
+        f"Total de técnicos elegíveis: {total} "
+        f"(incluir_desligados={incluir_desligados}, retry_falhos={retry_falhos}, reset={reset})"
+    )
+
+    for idx, t in enumerate(tecnicos, start=1):
+        prefixo = f"[{idx}/{total}] {t.code}"
+        if t.name:
+            prefixo += f" {t.name}"
+        log.bind(etapa="processar_lista", tecnico=t.code).info(prefixo)
+
         item = checkpoint.items.get(t.code)
         if not item:
             item = CheckpointItem(code=t.code)
             checkpoint.items[t.code] = item
             salvar_checkpoint(checkpoint)
-            
-        if item.status == "sucesso":
-            log.bind(etapa="processar_lista", tecnico=t.code).info("Técnico já processado com sucesso, pulando.")
+
+        if not reset and item.status == "sucesso":
+            log.bind(etapa="processar_lista", tecnico=t.code).info(
+                "→ já baixado em execução anterior, pulando"
+            )
+            sucesso += 1
+            pulados += 1
             continue
-            
-        if item.status == "falhou" and not retry_falhos:
-            log.bind(etapa="processar_lista", tecnico=t.code).warning("Técnico com falha anterior, pulando (use --retry-falhos).")
-            falhas += 1
+
+        if not reset and item.status == "falhou" and not retry_falhos:
+            log.bind(etapa="processar_lista", tecnico=t.code).warning(
+                "→ falhou em execução anterior; use --retry-falhos para reprocessar"
+            )
+            falha += 1
+            pulados += 1
             continue
+
+        # Sprint 6: Verificação de sessão antes de processar técnico
+        if detectar_logout(page):
+            relogins += 1
+            log.bind(etapa="sessao").warning(f"Sessão expirada. Re-login automático ({relogins}/3)")
+            if relogins > 3:
+                log.bind(etapa="sessao").error("Limite de re-logins atingido. Abortando.")
+                raise CredenciaisInvalidasError("Sessão irrecuperável (limite de re-logins)")
             
+            fazer_login(page)
+            navegar_ate_rotina(page)
+        elif not aguardar_imagem(page, "11_colocar_o_codigo_tecnico.png", timeout=2, threshold=0.65):
+            # Se não está logado mas também não está na rotina, tenta recuperar
+            log.bind(etapa="sessao").info("Não detectado campo de filtro. Tentando recuperar tela.")
+            if not _preparar_para_proximo(page, t.code):
+                 log.bind(etapa="sessao").warning("Falha ao recuperar tela. Tentando re-navegar.")
+                 navegar_ate_rotina(page)
+
         item.tentativas += 1
         item.status = "processando"
         salvar_checkpoint(checkpoint)
-        
+
         try:
             resultado = baixar_xlsx_tecnico(page, code=t.code, name=t.name or "")
             item.status = "sucesso"
             item.arquivo = str(resultado["arquivo"])
             item.hash_sha256 = resultado["hash_sha256"]
             item.erro_msg = None
-            log.bind(etapa="processar_lista", tecnico=t.code).success(f"Download concluído: {item.arquivo}")
-            processados_agora += 1
+            sucesso += 1
+            log.bind(etapa="processar_lista", tecnico=t.code).success(
+                f"✓ sucesso — {item.arquivo}"
+            )
         except CredenciaisInvalidasError:
             item.status = "falhou"
             item.erro_msg = "Credenciais inválidas"
             salvar_checkpoint(checkpoint)
+            _imprimir_resumo(total, sucesso, falha + 1, pulados, time.monotonic() - inicio)
             raise
         except Exception as e:
+            # Sprint 6: Screenshot automático em toda falha
+            screenshot_path = tirar_screenshot(page, etapa=f"falha_{t.code}", evidencia=True)
             item.status = "falhou"
             item.erro_msg = str(e)
-            log.bind(etapa="processar_lista", tecnico=t.code).error(f"Falha ao processar: {e}")
-            falhas += 1
-            
+            falha += 1
+            log.bind(etapa="processar_lista", tecnico=t.code).error(
+                f"✗ falhou após {item.tentativas} tentativa(s) — {e} (Evidência: {screenshot_path})"
+            )
+
         salvar_checkpoint(checkpoint)
-        
-    log.bind(etapa="processar_lista").info(f"Processamento concluído. Processados agora: {processados_agora}, Falhas: {falhas}")
-    if falhas > 0:
-        return 1
-    return 0
+
+        # Antes de prosseguir para o próximo técnico, garantir que a tela
+        # esteja na rotina (campo 11). Sucesso ou falha, o estado pode
+        # variar — sem isso, o próximo `_executar_download` tenta clicar no
+        # campo 11 a partir da tela errada e falha por consequência (não
+        # mérito próprio). Se não conseguir recuperar, abortamos o restante.
+        if idx < total:
+            if not _preparar_para_proximo(page, t.code):
+                log.bind(etapa="processar_lista").error(
+                    "Abortando loop — tela não recuperável para o próximo técnico"
+                )
+                falha += (total - idx)
+                break
+
+    _imprimir_resumo(total, sucesso, falha, pulados, time.monotonic() - inicio)
+    return 1 if falha > 0 else 0
