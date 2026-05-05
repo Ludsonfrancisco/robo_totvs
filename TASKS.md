@@ -89,15 +89,15 @@
 
 ### Sprint 9 — Planilha: leitura, schema e validação pré-execução
 **Objetivo:** dado um caminho de XLSX, retornar `list[LinhaTransferencia]` validado ou abortar com exit 3 e mensagem citando linha/coluna ofensora — **sem abrir o navegador**. Sprint não toca Protheus; testável com fixtures de XLSX.
-- [ ] Adicionar `openpyxl>=3.1.5` em `requirements.txt` (PRD §13.11)
-- [ ] Criar `referencias/trans_mult.xlsx` com cabeçalho real (20 colunas da PRD §6.7.1) — arquivo atual está com 0 bytes; preencher com 1 linha de exemplo válida + commit
-- [ ] Estender `core/config.py` com `transferencia_xlsx_path: Path = Path("referencias/trans_mult.xlsx")` e `TRANSFERENCIA_XLSX` em `.env.example`
-- [ ] Estender `core/schema.py` com modelo `LinhaTransferencia` (Pydantic) — 20 campos da PRD §6.7.1; `Decimal` (não `float`) para `quantidade` e `potencia`; `validade` como `date` opcional formato `dd/mm/aaaa`; `numero_serie` obrigatório com `min_length=1`
-- [ ] Estender `core/schema.py` com modelo `CheckpointTransferenciaMultipla` (campos da PRD §6.7.4)
-- [ ] Estender `core/schema.py` com dataclass/modelo `PlanilhaCarregada(linhas: list[LinhaTransferencia], sha256: str, caminho: Path)` — retorno unificado de `carregar_transferencias`
-- [ ] Criar `core/planilha.py` com `carregar_transferencias(path: Path) -> PlanilhaCarregada`
-- [ ] Em `core/planilha.py`: validar `zipfile.is_zipfile(path)` antes de abrir (mesma checagem de F3) — falha ⇒ `PlanilhaInvalidaError`
-- [ ] Em `core/planilha.py`: normalizar nomes de cabeçalho da primeira aba — case-insensitive, remover espaços/pontos/underscores (`Prod.Orig.` ≡ `prod orig` ≡ `PROD_ORIG`)
+- [x] Adicionar `openpyxl>=3.1.5` em `requirements.txt` (PRD §13.11)
+- [x] Criar `referencias/trans_mult.xlsx` com cabeçalho real (20 colunas da PRD §6.7.1) — arquivo atual está com 0 bytes; preencher com 1 linha de exemplo válida + commit
+- [x] Estender `core/config.py` com `transferencia_xlsx_path: Path = Path("referencias/trans_mult.xlsx")` e `TRANSFERENCIA_XLSX` em `.env.example`
+- [x] Estender `core/schema.py` com modelo `LinhaTransferencia` (Pydantic) — 20 campos da PRD §6.7.1; `Decimal` (não `float`) para `quantidade` e `potencia`; `validade` como `date` opcional formato `dd/mm/aaaa`; `numero_serie` obrigatório com `min_length=1`
+- [x] Estender `core/schema.py` com modelo `CheckpointTransferenciaMultipla` (campos da PRD §6.7.4)
+- [x] Estender `core/schema.py` com dataclass/modelo `PlanilhaCarregada(linhas: list[LinhaTransferencia], sha256: str, caminho: Path)` — retorno unificado de `carregar_transferencias`
+- [x] Criar `core/planilha.py` com `carregar_transferencias(path: Path) -> PlanilhaCarregada`
+- [x] Em `core/planilha.py`: validar `zipfile.is_zipfile(path)` antes de abrir (mesma checagem de F3) — falha ⇒ `PlanilhaInvalidaError`
+- [x] Em `core/planilha.py`: normalizar nomes de cabeçalho da primeira aba — case-insensitive, remover espaços/pontos/underscores (`Prod.Orig.` ≡ `prod orig` ≡ `PROD_ORIG`)
 - [ ] Em `core/planilha.py`: rejeitar planilha se faltar qualquer coluna obrigatória (✅ em PRD §6.7.1) — erro lista as colunas faltantes
 - [ ] Em `core/planilha.py`: para cada linha de dado, validar que `prod_orig`, `armazem_orig`, `prod_destino`, `armazem_destino`, `numero_serie`, `quantidade` são não-vazios; `quantidade` parseável como `Decimal` — erro cita linha (1-indexed, descontando cabeçalho) e coluna
 - [ ] Em `core/planilha.py`: calcular SHA-256 do arquivo bruto e popular `PlanilhaCarregada.sha256` — usado pela idempotência da Sprint 12
@@ -113,7 +113,7 @@
 - [ ] Criar `acoes.py::capturar_numero_documento(page) -> str` — preferência DOM (`input` adjacente ao label "Numero Documento", varrendo `[page, *page.frames]`); fallback OCR em região fixa relativa ao cabeçalho [ref11.1]; resultado precisa casar regex `^[A-Z0-9]{10,15}$` (formato observado: `YUXI000005MX1`) — caso contrário levanta `NavegacaoError`
 - [ ] Em `flows/transferencia_multipla.py` (esqueleto inicial): após capturar o número, gravar **imediatamente** em `state/transferencia_multipla_AAAA-MM-DD.json` via `core/estado.py` (escrita atômica) com `status="em_andamento"`, `numero_documento`, `iniciada_em`, `planilha_sha256` — antes de qualquer interação com o grid (PRD §6.7.2 passo 2)
 - [ ] Logging: `log.bind(etapa="trans_mult.abrir", documento=numero).info(...)` — campo `tecnico` recebe `"-"` neste fluxo (PRD §6.7.6)
-- [ ] **Demo:** `python main.py trans-multipla --planilha <fixture_vazia.xlsx>` ⇒ robô loga, navega até `Tranf. Multipla`, abre INCLUIR, captura o número (ex.: `YUXI000005MX1`), grava no checkpoint, sai com exit 0 sem preencher nada. Verificar arquivo de checkpoint contém o número correto. Validar manualmente no Protheus que **nenhum documento foi salvo** (já que não houve clique em Salvar).
+- [ ] **Demo:** `python main.py trans-multipla --planilha <fixture_vazia.xlsx>` ⇒ robô loga, navega até `Tranf. Multipla`, abre INCLUIR, captura o número (ex.: `YUXI000005MX1`), grava no checkpoint, sai com exit 0 sem preencher nada. Verificar arquivo de checkpoint contém o número correto. Validar manualmente no Protheus que **nenhum documento foi salvo** (já que não houve clique em Salvar) Headless=False.
 
 ### Sprint 11 — Preencher uma linha do grid + retry por linha + evidências
 **Objetivo:** dado um `LinhaTransferencia`, preencher os 20 campos do grid na ordem correta com `Quantidade` por último, recuperar de erros por retry de linha (3×) e abortar a execução inteira após esgotar. Testável com planilha de 1 linha.

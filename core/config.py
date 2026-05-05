@@ -23,12 +23,18 @@ class Settings(BaseSettings):
     VIEWPORT_H: int = 768
     DOWNLOAD_TIMEOUT_S: int = 60
     TECNICOS_JSON: str = "technicians.json"
+    TRANSFERENCIA_XLSX: str = "referencias/trans_mult.xlsx"
     BROWSER_CHANNEL: str = "chrome"
     BROWSER_USER_DATA_DIR: str = ".browser-profile/protheus"
 
     @property
     def tecnicos_path(self) -> Path:
         p = Path(self.TECNICOS_JSON)
+        return p if p.is_absolute() else PROJECT_ROOT / p
+
+    @property
+    def transferencia_xlsx_path(self) -> Path:
+        p = Path(self.TRANSFERENCIA_XLSX)
         return p if p.is_absolute() else PROJECT_ROOT / p
 
     @property
