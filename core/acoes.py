@@ -11,6 +11,9 @@ Convenções:
 
 from __future__ import annotations
 
+import re
+from typing import Literal
+
 from playwright.sync_api import Frame, Locator, Page
 from tenacity import (
     RetryError,
@@ -240,6 +243,36 @@ def _passo_06_confirmacao_opcional(page: Page, timeout_s: int = 6) -> bool:
     return False
 
 
+def _passo_06_1_fechar_assistente(page: Page) -> bool:
+    """Passo 06.1 (opcional) — Fecha o popup da assistente virtual."""
+    import time as _time
+    log.bind(etapa="login").info("Verificando se o popup da assistente apareceu (06.1)...")
+    
+    # 1. Tentar localizar via DOM
+    for ctx in [page, *page.frames]:
+        try:
+            # Podemos tentar buscar elementos contendo o texto da assistente e clicar no botão/SVG próximo
+            loc_assist = ctx.locator('text="assistente virtual da TOTVS"').first
+            if loc_assist.is_visible(timeout=500):
+                # Tentativa genérica de clicar em SVG ou botão de fechar dentro do mesmo container pai
+                fechar_btn = loc_assist.locator('xpath=../..//svg').first
+                if fechar_btn.count() > 0:
+                    fechar_btn.click()
+                    log.bind(etapa="login").info("Assistente fechada via DOM (SVG)")
+                    return True
+        except Exception:
+            continue
+
+    # 2. Matching visual (seguro e principal)
+    centro = aguardar_imagem(page, "06.1_clicar_no_X_assiste.png", timeout=3, threshold=0.5)
+    if centro is not None:
+        page.mouse.click(*centro)
+        log.bind(etapa="login").info(f"Assistente fechada via matching em {centro}")
+        return True
+        
+    return False
+
+
 def _aguardar_home(page: Page, timeout_s: int = 60) -> bool:
     """Valida home pós-login: tenta DOM (Favoritos/menu) e cai para matching."""
     import time as _time
@@ -303,6 +336,9 @@ def _executar_login(page: Page) -> None:
 
     # Passo 06 — segunda confirmação (opcional, só se aparecer).
     _passo_06_confirmacao_opcional(page, timeout_s=6)
+    
+    # Passo 06.1 - Popup assistente virtual (Carolina)
+    _passo_06_1_fechar_assistente(page)
 
     # Passo 07 — validar home (favoritos visível).
     if not _aguardar_home(page, timeout_s=60):
@@ -397,17 +433,19 @@ class NavegacaoError(Exception):
     retry=retry_if_exception_type(NavegacaoError),
     reraise=True,
 )
-def _executar_navegacao_rotina(page: Page) -> None:
+def _executar_navegacao_rotina(page: Page, rotina: Literal["mat_estoque", "trans_multipla"] = "mat_estoque") -> None:
     import time as _time
     
+    nome_rotina_log = "Mat Estoque Por Tecnico" if rotina == "mat_estoque" else "Tranf. Multipla"
+    
     # Heurística: Checa se o relatório já está visível (menu já pode estar aberto)
-    log.bind(etapa="navegacao").info("Verificando se Mat Estoque Por Tecnico já está visível...")
+    log.bind(etapa="navegacao").info(f"Verificando se {nome_rotina_log} já está visível...")
     ja_visivel = False
     for ctx in [page, *page.frames]:
         try:
-            if ctx.locator('text="Mat Estoque Por Tecnico"').first.is_visible(timeout=500):
+            if ctx.locator(f'text="{nome_rotina_log}"').first.is_visible(timeout=500):
                 ja_visivel = True
-                log.bind(etapa="navegacao").info("Relatório já visível, pulando clique em Favoritos")
+                log.bind(etapa="navegacao").info(f"{nome_rotina_log} já visível, pulando clique em Favoritos")
                 break
         except Exception:
             pass
@@ -447,28 +485,59 @@ def _executar_navegacao_rotina(page: Page) -> None:
             
         _time.sleep(2) # Aguarda animação do menu
     
-    # Passo 08: Abrir relatório
-    log.bind(etapa="navegacao").info("Aguardando e clicando em Mat Estoque Por Tecnico (08)...")
+    # Passo 08: Abrir relatório/rotina
+    log.bind(etapa="navegacao").info(f"Aguardando e clicando em {nome_rotina_log} (08)...")
     clicou_rel = False
     for ctx in [page, *page.frames]:
         try:
-            loc = ctx.locator('text="Mat Estoque Por Tecnico"').first
+            loc = ctx.locator(f'text="{nome_rotina_log}"').first
             if loc.is_visible(timeout=1000):
                 loc.click()
-                log.bind(etapa="navegacao").info("Clicou no relatório via DOM")
+                log.bind(etapa="navegacao").info(f"Clicou em {nome_rotina_log} via DOM")
                 clicou_rel = True
                 break
         except Exception:
             pass
             
     if not clicou_rel:
-        clicou_rel = clicar_imagem(page, "08_clicar_Mat_Estoque_Por_Tecnico.png", timeout=15, threshold=0.65)
+        imagem_ref = "08_clicar_Mat_Estoque_Por_Tecnico.png" if rotina == "mat_estoque" else "08.1_Tranf._Multipla.png"
+        clicou_rel = clicar_imagem(page, imagem_ref, timeout=15, threshold=0.65)
         
     if not clicou_rel:
-        tirar_screenshot(page, etapa="falha_08_relatorio", evidencia=True)
-        raise NavegacaoError("Passo 08: Falha ao clicar no relatório")
+        tirar_screenshot(page, etapa="falha_08_rotina", evidencia=True)
+        raise NavegacaoError(f"Passo 08: Falha ao clicar na rotina {nome_rotina_log}")
 
     _time.sleep(3)
+
+    if rotina == "trans_multipla":
+        # Se for transferência múltipla, fluxo encerra após clicar na rotina
+        # Pois a tela Transferencia Mod. II abrirá
+        # Vamos validar se "Transferencia Mod. II" ou o botão "+ Incluir" aparecem
+        log.bind(etapa="navegacao").info("Aguardando tela Transferencia Mod. II...")
+        import time as _time
+        tela_ok = False
+        deadline = _time.monotonic() + 15
+        while _time.monotonic() < deadline:
+            for ctx in [page, *page.frames]:
+                try:
+                    if ctx.locator('text="Transferencia Mod. II"').first.is_visible(timeout=200):
+                        tela_ok = True
+                        break
+                except Exception:
+                    continue
+            if tela_ok:
+                break
+        
+        if not tela_ok:
+            if aguardar_imagem(page, "09.1_Incluir.png", timeout=5, threshold=0.5) is not None:
+                tela_ok = True
+                
+        if not tela_ok:
+            # Fallback visual ou continua e deixa abrir_inclusao falhar se for o caso
+            log.bind(etapa="navegacao").warning("Não confirmou tela de Transferência Mod II via DOM/Imagem. Prosseguindo mesmo assim.")
+            
+        log.bind(etapa="navegacao").success("Rotina Tranf. Multipla alcançada com sucesso")
+        return
     
     # Passo 09: Confirmar tela "TOTVS Linha Protheus" (Data base/Grupo/Filial/Ambiente).
     # OPCIONAL: o Protheus pula este diálogo quando o profile do Chrome já tem
@@ -577,10 +646,10 @@ def _executar_navegacao_rotina(page: Page) -> None:
         
     log.bind(etapa="navegacao").success("Rotina alcançada com sucesso (passo 11)")
 
-def navegar_ate_rotina(page: Page) -> None:
+def navegar_ate_rotina(page: Page, rotina: Literal["mat_estoque", "trans_multipla"] = "mat_estoque") -> None:
     """Navega da home até a tela de filtro do relatório com retry (3x)."""
     try:
-        _executar_navegacao_rotina(page)
+        _executar_navegacao_rotina(page, rotina)
     except RetryError as e:
         log.bind(etapa="navegacao").error(f"Navegação falhou após retries: {e}")
         raise NavegacaoError(str(e)) from e
@@ -911,3 +980,111 @@ def baixar_xlsx_tecnico(page: Page, code: str, name: str = "") -> dict:
     except DownloadError as e:
         log.bind(etapa="download", tecnico=code).error(f"Download falhou: {e}")
         raise
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type(NavegacaoError),
+    reraise=True,
+)
+def abrir_inclusao_trans_multipla(page: Page) -> None:
+    """Clica em + Incluir na tela Transferencia Mod. II e valida o título."""
+    import time as _time
+    from core.visao import validar_texto_ocr
+    
+    log.bind(etapa="navegacao").info("Aguardando e clicando em + Incluir (09.1)...")
+
+    clicou = False
+    seletores = [
+        'button:has-text("Incluir")',
+        '[title="Incluir"]',
+        'span:has-text("Incluir")',
+        'a:has-text("Incluir")',
+        'div[role="button"]:has-text("Incluir")',
+        'text="Incluir"'
+    ]
+    for ctx in [page, *page.frames]:
+        for sel in seletores:
+            try:
+                loc = ctx.locator(sel).first
+                if loc.is_visible(timeout=500):
+                    loc.click()
+                    clicou = True
+                    log.bind(etapa="navegacao").info(f"Clicou em + Incluir via DOM ({sel})")
+                    break
+            except Exception:
+                continue
+        if clicou: break
+
+    if not clicou:
+        log.bind(etapa="navegacao").warning("Fallback visual para + Incluir...")
+        clicou = clicar_imagem(page, "09.1_Incluir.png", timeout=15, threshold=0.35)
+
+    if not clicou:
+        tirar_screenshot(page, etapa="falha_09.1_incluir", evidencia=True)
+        raise NavegacaoError("Falha ao clicar em + Incluir (09.1)")        
+    _time.sleep(3)
+    
+    titulo_ok = False
+    for ctx in [page, *page.frames]:
+        try:
+            if ctx.locator('text="Transferencia Mod. II - INCLUIR"').first.is_visible(timeout=500):
+                titulo_ok = True
+                log.bind(etapa="navegacao").info("Título Transferencia Mod. II - INCLUIR validado via DOM")
+                break
+        except Exception:
+            continue
+            
+    if not titulo_ok:
+        if validar_texto_ocr(page, "Transferencia Mod. II - INCLUIR"):
+            titulo_ok = True
+            
+    if not titulo_ok:
+        tirar_screenshot(page, etapa="falha_titulo_incluir", evidencia=True)
+        raise NavegacaoError("Falha ao validar título de Inclusão via DOM ou OCR")
+
+
+def capturar_numero_documento(page: Page) -> str:
+    """Lê o Numero Documento gerado automaticamente pelo Protheus."""
+    import re
+    from core.visao import _decode_screenshot
+    
+    log.bind(etapa="navegacao").info("Capturando Numero Documento (11.1)...")
+    regex_doc = re.compile(r"^[A-Z0-9]{10,15}$")
+    
+    # 1. Tentar DOM
+    for ctx in [page, *page.frames]:
+        try:
+            inputs = ctx.locator('input').all()
+            for inp in inputs:
+                try:
+                    val = inp.input_value(timeout=100).strip()
+                    if regex_doc.match(val):
+                        log.bind(etapa="navegacao").info(f"Documento capturado via DOM: {val}")
+                        return val
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    # 2. Tentar OCR (lendo toda a tela)
+    log.bind(etapa="navegacao").debug("DOM falhou para capturar número do documento, tentando OCR...")
+    try:
+        import pytesseract
+        import cv2
+        screenshot = _decode_screenshot(page.screenshot(full_page=False))
+        gray = cv2.cvtColor(screenshot, cv2.COLOR_BGR2GRAY)
+        _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
+        texto = pytesseract.image_to_string(thresh, lang='por')
+        
+        for palavra in texto.split():
+            palavra_limpa = re.sub(r'[^A-Z0-9]', '', palavra.upper())
+            if regex_doc.match(palavra_limpa):
+                log.bind(etapa="navegacao").info(f"Documento capturado via OCR: {palavra_limpa}")
+                return palavra_limpa
+                
+    except Exception as e:
+        log.bind(etapa="navegacao").warning(f"OCR para número do documento falhou: {e}")
+
+    tirar_screenshot(page, etapa="falha_captura_documento", evidencia=True)
+    raise NavegacaoError("Não foi possível capturar o Numero Documento via DOM ou OCR")
