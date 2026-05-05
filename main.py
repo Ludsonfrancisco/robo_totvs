@@ -18,7 +18,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from core.acoes import CredenciaisInvalidasError, PlanilhaInvalidaError, fazer_login, navegar_ate_rotina
+from core.acoes import CredenciaisInvalidasError, PlanilhaInvalidaError, TransferenciaIncompletaError, fazer_login, navegar_ate_rotina
 from core.log import log
 from core.navegador import iniciar_navegador
 from flows.processar_lista import processar_lista
@@ -104,6 +104,9 @@ def main(argv: list[str] | None = None) -> int:
         except PlanilhaInvalidaError as e:
             log.bind(etapa="main").error(f"Erro de validação na planilha: {e}")
             return 3
+        except TransferenciaIncompletaError as e:
+            log.bind(etapa="main").error(f"Erro incompleto de transferência: {e}")
+            return 1
         except FileNotFoundError as e:
             log.bind(etapa="main").error(f"Arquivo de configuração não encontrado: {e}")
             return 3

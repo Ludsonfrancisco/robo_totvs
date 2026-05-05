@@ -31,12 +31,12 @@ class LinhaTransferencia(BaseModel):
     um_orig: Optional[str] = None
     armazem_orig: str = Field(min_length=1)
     endereco_orig: Optional[str] = None
-    prod_destino: str = Field(min_length=1)
+    prod_destino: Optional[str] = None
     desc_destino: Optional[str] = None
     um_destino: Optional[str] = None
-    armazem_destino: str = Field(min_length=1)
+    armazem_destino: Optional[str] = None
     endereco_destino: Optional[str] = None
-    numero_serie: str = Field(min_length=1)
+    numero_serie: Optional[str] = None
     lote: Optional[str] = None
     sub_lote: Optional[str] = None
     validade: Optional[date] = None

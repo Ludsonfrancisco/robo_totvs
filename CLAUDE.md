@@ -17,8 +17,11 @@ pip install -r requirements.txt
 playwright install chromium
 cp .env.example .env  # fill PROTHEUS_URL/USER/PASS
 
-# run end-to-end (current entrypoint hard-codes one technician for Sprint 4 demo)
+# run end-to-end
 python main.py
+
+# run Transferência Múltipla (Sprint 9-12)
+python main.py trans-multipla [--planilha references/trans_mult.xlsx]
 
 # headed/headless toggle
 HEADLESS=true python main.py
@@ -52,8 +55,10 @@ The Protheus WebApp renders most of its UI inside `<canvas>` and inside dynamica
 | `core/visao.py` | Template matching pipeline + `validar_texto_ocr`. Tolerates references missing `.png` extension (the original `01_link_de_acesso` was extensionless). |
 | `core/acoes.py` | High-level Protheus actions: `fazer_login`, `navegar_ate_rotina`, `baixar_xlsx_tecnico`. Each is wrapped in `@retry(stop_after_attempt(3), wait_exponential)` from `tenacity`. |
 | `core/estado.py` | Per-day checkpoint at `state/checkpoint_AAAA-MM-DD.json`. Uses **atomic write** (write-temp + rename) to survive crashes mid-write — do not change to direct write. |
-| `core/schema.py` | Pydantic models: `Tecnico` (input from JSON) and `CheckpointItem` (state). |
-| `flows/processar_lista.py` | Orchestrator: filters `status == "Ativo"` by default, skips `sucesso`, gates re-tries on failed entries behind `--retry-falhos`. |
+| `core/schema.py` | Pydantic models: `Tecnico`, `LinhaTransferencia` and `CheckpointItem`. |
+| `core/planilha.py` | Reading and validation of F7 XLSX spreadsheets. |
+| `flows/processar_lista.py` | Orchestrator for F3-F6 (download reports). |
+| `flows/transferencia_multipla.py` | Orchestrator for F7 (write transfers). |
 | `referencias/` | 18 ground-truth PNGs of each Protheus step. Re-capture if Protheus UI changes. |
 | `scripts/` | One-off DOM inspectors and download debuggers (`inspect_*.py`, `debug_download.py`). Not part of the runtime path. |
 | `agentes/estrategias_download_protheus.py` | Reference notes on download interception strategies — exploratory, not imported. |

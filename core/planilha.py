@@ -78,9 +78,9 @@ def carregar_transferencias(path: Path) -> PlanilhaCarregada:
     }
 
     # Colunas obrigatórias conforme PRD §6.7.1
+    # Nota: prod_destino e numero_serie podem ser auto-preenchidos pelo sistema
     obrigatorias = [
-        "prodorig", "armazemorig", "proddestino", 
-        "armazemdestino", "numeroserie", "quantidade"
+        "prodorig", "armazemorig", "quantidade"
     ]
     faltantes = [h for h in obrigatorias if h not in col_map]
     if faltantes:

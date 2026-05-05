@@ -219,10 +219,19 @@ def validar_texto_ocr(page: Page, texto_esperado: str) -> bool:
         from rapidfuzz import fuzz, process
     except ImportError:
         log.bind(etapa="ocr").warning("pytesseract ou rapidfuzz não instalados. Pulando OCR.")
-        return True
+        return False # Mudança: retorna False se não puder processar
 
     try:
-        screenshot = _decode_screenshot(page.screenshot(full_page=False))
+        # Verifica se tesseract está instalado
+        pytesseract.get_tesseract_version()
+    except Exception:
+        log.bind(etapa="ocr").warning("Tesseract OCR não instalado no sistema. Pulando validação OCR.")
+        return False
+
+    try:
+        # Usa timeout curto para o screenshot para evitar travamentos
+        screenshot_bytes = page.screenshot(timeout=10000)
+        screenshot = _decode_screenshot(screenshot_bytes)
         # Pré-processamento simples para melhorar OCR
         gray = cv2.cvtColor(screenshot, cv2.COLOR_BGR2GRAY)
         _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)

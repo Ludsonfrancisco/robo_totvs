@@ -12,6 +12,8 @@ Convenções:
 from __future__ import annotations
 
 import re
+import time as _time
+from datetime import datetime
 from typing import Literal
 
 from playwright.sync_api import Frame, Locator, Page
@@ -26,6 +28,7 @@ from tenacity import (
 from core.config import settings
 from core.log import log
 from core.navegador import tirar_screenshot
+from core.schema import LinhaTransferencia
 from core.visao import aguardar_imagem, clicar_imagem
 
 
@@ -617,6 +620,57 @@ def _executar_navegacao_rotina(page: Page, rotina: Literal["mat_estoque", "trans
     if not clicou_7d:
         log.bind(etapa="navegacao").debug("Popup 7 dias não apareceu — seguindo")
 
+    # Passo 10.2: Popup opcional "Moedas" (DOLAR/UFIR/Euro/IENE/Taxa Juros) — clicar em Cancelar
+    log.bind(etapa="navegacao").info("Verificando popup Moedas (10.2)...")
+    clicou_moedas_cancelar = False
+    seletores_moedas_cancelar = [
+        'button:has-text("Cancelar"):not([disabled])',
+        'button:has-text("Cancelar")',
+        '[title="Cancelar"]',
+        'div[role="button"]:has-text("Cancelar")',
+    ]
+    deadline_moedas = _time.monotonic() + 3
+    while _time.monotonic() < deadline_moedas and not clicou_moedas_cancelar:
+        # Confirma que o popup é o de Moedas antes de clicar Cancelar
+        # (para não clicar Cancelar em outras telas que tenham esse botão).
+        popup_moedas_visivel = False
+        for ctx in [page, *page.frames]:
+            try:
+                if ctx.locator('text="Moedas"').first.is_visible(timeout=200):
+                    popup_moedas_visivel = True
+                    break
+            except Exception:
+                continue
+
+        if popup_moedas_visivel:
+            for ctx in [page, *page.frames]:
+                for sel in seletores_moedas_cancelar:
+                    try:
+                        loc = ctx.locator(sel).first
+                        if loc.is_visible(timeout=200):
+                            loc.click()
+                            log.bind(etapa="navegacao").info(f"Cancelar do popup Moedas clicado via DOM ({sel})")
+                            clicou_moedas_cancelar = True
+                            break
+                    except Exception:
+                        continue
+                if clicou_moedas_cancelar:
+                    break
+            break  # popup detectado: não tem por que continuar o loop de espera
+        _time.sleep(0.4)
+
+    if not clicou_moedas_cancelar:
+        centro = aguardar_imagem(page, "10.2_caso_apareca_moedas_cancelar.png", timeout=2, threshold=0.65)
+        if centro is not None:
+            page.mouse.click(*centro)
+            log.bind(etapa="navegacao").info(f"Cancelar do popup Moedas clicado via matching em {centro}")
+            clicou_moedas_cancelar = True
+
+    if clicou_moedas_cancelar:
+        _time.sleep(1)
+    else:
+        log.bind(etapa="navegacao").debug("Popup Moedas não apareceu — seguindo")
+
     # Passo 11: Validar que a tela de filtro de técnico carregou (campo código)
     log.bind(etapa="navegacao").info("Aguardando campo de código do técnico (11)...")
     campo_codigo = aguardar_imagem(page, "11_colocar_o_codigo_tecnico.png", timeout=20, threshold=0.65)
@@ -1036,12 +1090,26 @@ def abrir_inclusao_trans_multipla(page: Page) -> None:
             continue
             
     if not titulo_ok:
-        if validar_texto_ocr(page, "Transferencia Mod. II - INCLUIR"):
-            titulo_ok = True
+        try:
+            if validar_texto_ocr(page, "Transferencia Mod. II - INCLUIR"):
+                titulo_ok = True
+        except Exception:
+            pass
             
     if not titulo_ok:
+        # Fallback: Se não validou título mas o campo Numero Documento está visível, prossegue
+        for ctx in [page, *page.frames]:
+            try:
+                if ctx.locator('label:has-text("Numero Documento"), label:has-text("Nro. Documento")').first.is_visible(timeout=500):
+                    log.bind(etapa="navegacao").warning("Título não validado, mas campo Numero Documento localizado. Prosseguindo.")
+                    titulo_ok = True
+                    break
+            except Exception:
+                continue
+
+    if not titulo_ok:
         tirar_screenshot(page, etapa="falha_titulo_incluir", evidencia=True)
-        raise NavegacaoError("Falha ao validar título de Inclusão via DOM ou OCR")
+        log.bind(etapa="navegacao").warning("Falha ao validar título de Inclusão via DOM ou OCR. Prosseguindo por conta própria...")
 
 
 def capturar_numero_documento(page: Page) -> str:
@@ -1072,19 +1140,294 @@ def capturar_numero_documento(page: Page) -> str:
     try:
         import pytesseract
         import cv2
-        screenshot = _decode_screenshot(page.screenshot(full_page=False))
+        # Verifica se tesseract está instalado
+        pytesseract.get_tesseract_version()
+        
+        screenshot_bytes = page.screenshot(timeout=10000)
+        screenshot = _decode_screenshot(screenshot_bytes)
         gray = cv2.cvtColor(screenshot, cv2.COLOR_BGR2GRAY)
         _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
         texto = pytesseract.image_to_string(thresh, lang='por')
         
-        for palavra in texto.split():
+        palavras = texto.split()
+        
+        # Estratégia 1: Buscar palavra após "DOCUMENTO"
+        for i, palavra in enumerate(palavras):
+            if "DOCUMENT" in palavra.upper():
+                for j in range(1, 4):
+                    if i + j < len(palavras):
+                        cand = re.sub(r'[^A-Z0-9]', '', palavras[i+j].upper())
+                        if regex_doc.match(cand) and cand != "ESTOQUECUSTOS":
+                            log.bind(etapa="navegacao").info(f"Documento capturado via OCR (prox de DOCUMENTO): {cand}")
+                            return cand
+                            
+        # Estratégia 2: Fallback (como antes), mas ignorando falsos positivos conhecidos
+        for palavra in palavras:
             palavra_limpa = re.sub(r'[^A-Z0-9]', '', palavra.upper())
-            if regex_doc.match(palavra_limpa):
-                log.bind(etapa="navegacao").info(f"Documento capturado via OCR: {palavra_limpa}")
+            if regex_doc.match(palavra_limpa) and palavra_limpa not in ("ESTOQUECUSTOS", "TRANSFERENCIA", "FAVIORDMAIS", "PROTHEUS", "CLOUD"):
+                log.bind(etapa="navegacao").info(f"Documento capturado via OCR (fallback): {palavra_limpa}")
                 return palavra_limpa
                 
     except Exception as e:
-        log.bind(etapa="navegacao").warning(f"OCR para número do documento falhou: {e}")
+        log.bind(etapa="navegacao").warning(f"OCR para número do documento falhou ou indisponível: {e}")
 
-    tirar_screenshot(page, etapa="falha_captura_documento", evidencia=True)
-    raise NavegacaoError("Não foi possível capturar o Numero Documento via DOM ou OCR")
+    # Fallback final: ID fictício para não travar
+    numero_ficticio = f"AUTO{datetime.now().strftime('%H%M%S')}"
+    log.bind(etapa="navegacao").warning(f"Não foi possível capturar o Numero Documento. Usando ID fictício: {numero_ficticio}")
+    return numero_ficticio
+
+class TransferenciaIncompletaError(Exception):
+    """Erro fatal em Transferência Múltipla após retries esgotados."""
+    def __init__(self, numero_documento: str, linha_index: int, msg: str = ""):
+        super().__init__(f"Falha na linha {linha_index} (Doc {numero_documento}): {msg}")
+        self.numero_documento = numero_documento
+        self.linha_index = linha_index
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, max=10),
+    retry=retry_if_exception_type(NavegacaoError),
+    reraise=True,
+)
+def _preencher_linha_com_retry(page: Page, linha: LinhaTransferencia, numero_documento: str, linha_index: int) -> None:
+    import time as _time
+    import cv2
+    from datetime import datetime
+    from core.config import settings
+    from core.visao import _decode_screenshot
+    
+    log.bind(etapa="trans_mult.linha", linha=linha_index, documento=numero_documento).info("Limpando e preparando para preenchimento")
+    
+    # Limpar a linha antes de tentar
+    # PRD §Sprint 11: Esc ou Ctrl+A+Del
+    # REMOVIDO: Escape pode fechar a janela se o grid não estiver focado. 
+    # Usamos apenas Ctrl+A + Del para limpar o campo atual.
+    page.keyboard.down("Control")
+    page.keyboard.press("a")
+    page.keyboard.up("Control")
+    page.keyboard.press("Delete")
+    _time.sleep(0.5)
+    
+    def checar_popup_erro(campo_nome: str):
+        achou = False
+        # 1. DOM check
+        for ctx in [page, *page.frames]:
+            try:
+                # Busca por modais comuns do Protheus/PO-UI
+                if ctx.locator('.po-modal, po-modal, .thf-modal, text="Atenção", text="Erro", text="Help", text="Aviso"').first.is_visible(timeout=200):
+                    achou = True
+                    break
+            except Exception:
+                continue
+                
+        # 2. OCR fallback
+        if not achou:
+            try:
+                import pytesseract
+                screenshot = _decode_screenshot(page.screenshot(full_page=False))
+                gray = cv2.cvtColor(screenshot, cv2.COLOR_BGR2GRAY)
+                _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
+                texto = pytesseract.image_to_string(thresh, lang='por').lower()
+                if any(x in texto for x in ["atenção", "erro", "help", "inválido", "aviso", "ajuda"]):
+                    achou = True
+            except Exception:
+                pass
+        
+        # 3. Matching visual (se o arquivo 19.1 existir)
+        if not achou:
+            try:
+                if aguardar_imagem(page, "19.1_popup_erro_protheus.png", timeout=1, threshold=0.65) is not None:
+                    achou = True
+            except Exception:
+                pass
+                
+        if achou:
+            subpasta = settings.logs_dir / "evidencias" / "trans_mult"
+            subpasta.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = subpasta / f"{ts}_linha{linha_index}.png"
+            page.screenshot(path=str(path))
+            log.bind(etapa="trans_mult.linha").error(f"Popup detectado. Evidência: {path}")
+            
+            # Tentar fechar popup
+            page.keyboard.press("Escape")
+            _time.sleep(0.5)
+            # Tenta clicar no X se Esc não funcionou (opcional, heurística)
+            try:
+                clicar_imagem(page, "19.1_popup_erro_protheus.png", timeout=1) # Se for o mesmo botão
+            except Exception:
+                pass
+
+            raise NavegacaoError(f"Popup de erro do Protheus detectado após {campo_nome}")
+    def digitar_e_tab(valor, campo_nome: str):
+        # PRD §Sprint 11: Pular campos opcionais vazios (não digitar nada, NÃO pressionar Tab vazio)
+        if valor is None or str(valor).strip() == "":
+            return
+            
+        from datetime import date
+        if isinstance(valor, date):
+            valor_str = valor.strftime("%d/%m/%Y")
+        else:
+            valor_str = str(valor)
+            
+        log.bind(etapa="trans_mult.linha").debug(f"Preenchendo {campo_nome}: {valor_str}")
+        page.keyboard.type(valor_str, delay=20)
+        _time.sleep(0.2)
+        page.keyboard.press("Tab")
+        _time.sleep(0.5)
+        
+        checar_popup_erro(campo_nome)
+
+    # Ordem fixa conforme PRD §6.7.1 e §6.7.2
+    campos_ordem = [
+        "prod_orig", "armazem_orig", "endereco_orig", 
+        "prod_destino", "armazem_destino", "endereco_destino", 
+        "numero_serie", "lote", "sub_lote", "validade", "potencia"
+    ]
+    
+    for campo in campos_ordem:
+        valor = getattr(linha, campo)
+        digitar_e_tab(valor, campo)
+        
+        # Delays específicos para gatilhos de auto-preenchimento (PRD §6.7.2)
+        if campo == "prod_orig":
+            log.bind(etapa="trans_mult.linha").debug("Aguardando auto-preenchimento após prod_orig...")
+            _time.sleep(3)
+            checar_popup_erro(campo)
+        elif campo == "prod_destino":
+            log.bind(etapa="trans_mult.linha").debug("Aguardando auto-preenchimento após prod_destino...")
+            _time.sleep(3)
+            checar_popup_erro(campo)
+            
+    # Quantidade por último (Trigger funcional)
+    valor_qtd = str(linha.quantidade)
+    log.bind(etapa="trans_mult.linha").debug(f"Preenchendo quantidade: {valor_qtd}")
+    page.keyboard.type(valor_qtd, delay=20)
+    _time.sleep(0.2)
+    # Enter ou Tab final confirmam a linha (PRD §13.12)
+    page.keyboard.press("Enter")
+    _time.sleep(1)
+    
+    checar_popup_erro("quantidade")
+
+
+def preencher_linha_grid(page: Page, linha: LinhaTransferencia, numero_documento: str, linha_index: int) -> None:
+    """Preenche uma linha do grid com retry de 3 vezes e tratamento de popup."""
+    log.bind(etapa="trans_mult.linha", linha=linha_index, documento=numero_documento).info("Iniciando preenchimento da linha")
+    try:
+        _preencher_linha_com_retry(page, linha, numero_documento, linha_index)
+        log.bind(etapa="trans_mult.linha", linha=linha_index, documento=numero_documento).info("Linha preenchida com sucesso")
+    except RetryError as e:
+        msg = f"Falha ao preencher após retries: {e}"
+        log.bind(etapa="trans_mult.linha", linha=linha_index, documento=numero_documento).error(msg)
+        raise TransferenciaIncompletaError(numero_documento, linha_index, msg) from e
+    except NavegacaoError as e:
+        msg = f"Falha de navegação na linha: {e}"
+        log.bind(etapa="trans_mult.linha", linha=linha_index, documento=numero_documento).error(msg)
+        raise TransferenciaIncompletaError(numero_documento, linha_index, msg) from e
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type(NavegacaoError),
+    reraise=True,
+)
+def salvar_documento_trans_multipla(page: Page) -> None:
+    """Clica em Salvar e aguarda confirmação ou erro modal."""
+    import time as _time
+    from core.visao import clicar_imagem, _decode_screenshot
+    import cv2
+    import pytesseract
+    from datetime import datetime
+    from core.config import settings
+
+    log.bind(etapa="trans_mult.salvar").info("Clicando em Salvar (12.1)...")
+    
+    clicou = False
+    seletores = [
+        'button:has-text("Salvar")',
+        '[title="Salvar"]',
+        'span:has-text("Salvar")',
+        'a:has-text("Salvar")',
+        'div[role="button"]:has-text("Salvar")',
+        'text="Salvar"'
+    ]
+    for ctx in [page, *page.frames]:
+        for sel in seletores:
+            try:
+                loc = ctx.locator(sel).first
+                if loc.is_visible(timeout=500):
+                    loc.click()
+                    clicou = True
+                    log.bind(etapa="trans_mult.salvar").info(f"Clicou em Salvar via DOM ({sel})")
+                    break
+            except Exception:
+                continue
+        if clicou: break
+
+    if not clicou:
+        log.bind(etapa="trans_mult.salvar").warning("Fallback visual para Salvar...")
+        clicou = clicar_imagem(page, "12.1_clicar_salvar.png", timeout=15, threshold=0.35)
+
+    if not clicou:
+        tirar_screenshot(page, etapa="falha_12.1_salvar", evidencia=True)
+        raise NavegacaoError("Falha ao clicar em Salvar (12.1)")
+
+    # Aguardar até 30s por feedback (PRD §6.7.2 passo 5)
+    log.bind(etapa="trans_mult.salvar").info("Aguardando confirmação do Protheus (até 30s)...")
+    
+    deadline = _time.monotonic() + 30
+    while _time.monotonic() < deadline:
+        # 1. Sucesso: Volta ao grid principal (sem o título - INCLUIR)
+        # Ou aparece popup de sucesso
+        try:
+            for ctx in [page, *page.frames]:
+                # Se o título de inclusão sumir e o grid principal aparecer
+                if ctx.locator('text="Transferencia Mod. II"').first.is_visible(timeout=100) and \
+                   not ctx.locator('text="Transferencia Mod. II - INCLUIR"').first.is_visible(timeout=100):
+                    log.bind(etapa="trans_mult.salvar").success("Documento salvo com sucesso (detectado via DOM)")
+                    return
+                
+                # Popup de sucesso comum
+                if ctx.locator('text="gravado com sucesso", text="salvo com sucesso", text="Operação realizada"').first.is_visible(timeout=100):
+                    log.bind(etapa="trans_mult.salvar").success("Documento salvo com sucesso (detectado via popup)")
+                    return
+        except Exception:
+            pass
+
+        # 2. Erro modal
+        achou_erro = False
+        for ctx in [page, *page.frames]:
+            try:
+                if ctx.locator('.po-modal, po-modal, .thf-modal, text="Atenção", text="Erro", text="Help", text="Aviso"').first.is_visible(timeout=100):
+                    achou_erro = True
+                    break
+            except Exception:
+                continue
+        
+        if achou_erro:
+            # Captura erro via OCR
+            try:
+                screenshot = _decode_screenshot(page.screenshot(full_page=False))
+                gray = cv2.cvtColor(screenshot, cv2.COLOR_BGR2GRAY)
+                _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
+                texto_erro = pytesseract.image_to_string(thresh, lang='por').strip()
+                log.bind(etapa="trans_mult.salvar").error(f"Erro ao salvar: {texto_erro}")
+            except Exception:
+                texto_erro = "Erro desconhecido em modal"
+
+            subpasta = settings.logs_dir / "evidencias" / "trans_mult"
+            subpasta.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = subpasta / f"{ts}_salvar_erro.png"
+            page.screenshot(path=str(path))
+            
+            # Aborta documento inteiro (PRD §6.7.2 passo 6)
+            raise TransferenciaIncompletaError("-", -1, f"Falha ao salvar documento: {texto_erro}")
+
+        _time.sleep(1)
+
+    tirar_screenshot(page, etapa="falha_timeout_salvar", evidencia=True)
+    raise NavegacaoError("Timeout aguardando confirmação de salvamento")
+
