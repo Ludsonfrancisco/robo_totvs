@@ -2,9 +2,9 @@
 
 > **Documento de requisitos do produto (PRD)**
 > Fonte única de verdade. Toda decisão técnica, sprint ou prompt subsequente deve referenciar este arquivo.
-> **Versão:** 1.6 — 2026-05-02
+> **Versão:** 1.7 — 2026-05-04
 > **Autor:** Ludson Francisco
-> **Status:** Pronto para Produção (Sprints 1-8 Concluídas)
+> **Status:** Pronto para Produção (Sprints 1-8 Concluídas) · F7 (Transferência Múltipla) em planejamento
 
 ---
 
@@ -422,6 +422,154 @@ robo-totvs/
 
 ---
 
+### 6.7 F7 — Transferência Múltipla baseada em Planilha
+
+> **Status:** novo escopo (v1.7) — entra como Sprint 9. Reaproveita F1 (login), F2 (navegação até rotina, com referências `*.1`) e a infraestrutura de visão/log/checkpoint. **Não substitui** F3–F6, que continuam servindo o pipeline de download "Mat. Estoque por Técnico".
+
+**Descrição:** A partir de uma planilha XLSX de entrada (`referencias/trans_mult.xlsx` ou caminho configurável via env), criar **um único documento de Transferência Múltipla** no Protheus (rotina `Tranf. Multipla` do módulo Estoque/Custos), preenchendo uma linha do grid para cada linha da planilha, e ao final salvar o documento — capturando o `Numero Documento` autogerado pelo Protheus e armazenando-o no checkpoint para auditoria.
+
+Diferente do fluxo F3 (export-only / read-only sobre o Protheus), **esta feature escreve dados no ERP**. Erro silencioso aqui produz dado incorreto em produção, então as garantias de validação por linha e o checkpoint pós-salvamento são parte do contrato funcional, não otimizações.
+
+**Pré-requisitos:**
+- F1 concluído (sessão autenticada).
+- F2 navega até **`Tranf. Multipla`** (não `Mat Estoque Por Técnico`) — usa as referências da família `*.1` (ver §10.3).
+- Planilha de entrada existe, é XLSX válido, tem ao menos 1 linha de dados além do cabeçalho.
+
+#### 6.7.1 Estrutura da planilha de entrada
+
+> **Fonte:** `referencias/trans_mult.xlsx` (artefato existente no repo). As colunas espelham 1-para-1 os campos do grid `Transferencia Mod. II — INCLUIR` (ver `referencias/10.1_loop_de_materail_baseado_na_planilha.png`). Nomes de coluna são lidos pelo cabeçalho da primeira aba — **case-insensitive**, espaços e pontos opcionais (ex.: `Prod.Orig.` / `prod orig` / `PROD_ORIG` são equivalentes).
+
+| Coluna | Campo no grid | Obrigatória | Observação |
+|---|---|---|---|
+| `prod_orig` | Prod.Orig. | ✅ | Código do produto de origem |
+| `desc_orig` | Desc.Orig. | ❌ | Auto-preenchida pelo Protheus após `prod_orig`; ler da planilha apenas se diferir |
+| `um_orig` | UM Orig. | ❌ | Idem (auto) |
+| `armazem_orig` | Armazem Orig. | ✅ | Código do armazém de origem |
+| `endereco_orig` | Endereco Orig. | ❌ | |
+| `prod_destino` | Prod.Destino | ✅ | Código do produto de destino |
+| `desc_destino` | Desc.Destino | ❌ | Auto |
+| `um_destino` | UM Destino | ❌ | Auto |
+| `armazem_destino` | Armazem Destino | ✅ | |
+| `endereco_destino` | Endereco Destino | ❌ | |
+| `numero_serie` | Numero Serie | ✅ | **Regra de negócio: obrigatório em toda linha** — linha sem `numero_serie` é rejeitada antes de tocar o Protheus |
+| `lote` | Lote | ❌ | |
+| `sub_lote` | Sub-Lote | ❌ | |
+| `validade` | Validade | ❌ | Formato `dd/mm/aaaa` quando presente |
+| `potencia` | Potencia | ❌ | Numérico |
+| `quantidade` | Quantidade | ✅ | **Trigger funcional: ao preencher Quantidade, o Protheus avança para a próxima linha do grid** (regra observada em UI). Por isso, é o **último** campo escrito da linha. |
+| `qt_2aum` | Qt 2aUM | ❌ | |
+| `estornado` | Estornado | ❌ | |
+| `sequencia` | Sequencia | ❌ | |
+| `lote_destino` | Lote Destino | ❌ | |
+
+**Validação pré-execução** (executada uma vez antes de abrir o Protheus, em `flows/transferencia_multipla.py`):
+- Arquivo existe e abre como XLSX válido (mesma checagem de `zipfile.is_zipfile` usada em F3).
+- Cabeçalho contém todas as colunas marcadas ✅ acima.
+- Toda linha de dado tem `prod_orig`, `armazem_orig`, `prod_destino`, `armazem_destino`, `numero_serie` e `quantidade` não-vazios.
+- `quantidade` parseável como decimal (`Decimal`, não `float`, para evitar erro de arredondamento em quantidades fracionárias).
+
+Falha de validação ⇒ aborta com **exit code 3** (config/dado inválido) **antes de abrir o navegador**. Mensagem de erro lista linha(s) e coluna(s) ofensoras.
+
+#### 6.7.2 Fluxo detalhado
+
+> Notação: `[refX.Y]` = referência visual em `referencias/X.Y_*.png`. Toda interação respeita o contrato híbrido DOM → CV → OCR de §3.3.
+
+```
+Pré-condições já garantidas: F1 (login) e F2 (Favoritos → "Tranf. Multipla" via [ref08.1])
+```
+
+1. **Abrir formulário de inclusão.** Na tela `Transferencia Mod. II` [ref09.1], clicar em `+ Incluir`. Aguardar até o título mudar para `Transferencia Mod. II - INCLUIR` (validação por OCR no cabeçalho).
+2. **Capturar `Numero Documento`.** O Protheus autogera um código no campo `Numero Documento` (ex.: `YUXI000005MX1`) [ref11.1]. Ler o valor via DOM (preferência: `<input>` com label adjacente "Numero Documento"); se for canvas, OCR sobre região fixa relativa ao cabeçalho. **Persistir imediatamente** no checkpoint da execução — se o robô morrer no meio do preenchimento, o operador precisa do código para fechar/cancelar manualmente o documento órfão.
+3. **Posicionar foco na primeira célula do grid.** Clicar na célula `Prod.Orig.` da primeira linha [ref10.1].
+4. **Loop por linha da planilha** — para cada `linha_planilha` (1..N):
+   1. **Preencher campos na ordem** abaixo, sempre confirmando cada campo com `Tab` (avança coluna):
+      - `prod_orig` → Tab → aguardar auto-preenchimento de `desc_orig`/`um_orig` (até 3s; se a planilha trouxe valor explícito divergente, sobrescrever).
+      - `armazem_orig` → Tab.
+      - `endereco_orig` (se presente) → Tab.
+      - `prod_destino` → Tab → aguardar auto-preenchimento equivalente do destino.
+      - `armazem_destino` → Tab.
+      - `endereco_destino` (se presente) → Tab.
+      - `numero_serie` → Tab. **(obrigatório — sem este campo, a linha não pode ser confirmada)**
+      - `lote`, `sub_lote`, `validade`, `potencia` (se presentes) → Tab cada.
+      - **`quantidade` por último** → Enter (ou Tab final). Esta é a confirmação da linha — antes desta tecla, **nenhuma linha deve ser dada como concluída**.
+   2. **Avançar para próxima linha** com seta `↓` (regra de negócio: navegação entre linhas é por seta, não por clique). Validar via screenshot que o cursor está na coluna `Prod.Orig.` da linha N+1 e que a linha N tem todos os campos visíveis.
+   3. **Logar** sucesso da linha N com `etapa="trans_mult.linha"`, `linha=N`, `numero_documento=<capturado no passo 2>`.
+5. **Salvar o documento.** Após a última linha confirmada, clicar em `Salvar` [ref12.1]. Aguardar (até 30s) feedback de sucesso (mudança de tela / popup de confirmação / volta ao grid de Tranf. Multipla com nova linha).
+6. **Validação pós-salvamento.** Se o Protheus retornar erro modal ("Falha ao salvar", "Saldo insuficiente", etc.) — capturar texto via OCR, screenshot da evidência, marcar **execução inteira como falha**, não como falha-parcial. Justificativa: um documento de transferência ou salva inteiro ou não salva — não há estado intermediário aceitável.
+7. **Atualizar checkpoint final** com `status=sucesso`, `numero_documento`, `linhas_total=N`, `linhas_ok=N`, `salvo_em=<timestamp>`.
+
+#### 6.7.3 Tratamento de erro por linha
+
+| Cenário | Reação |
+|---|---|
+| Campo recusado pelo Protheus (ex.: produto inexistente) — popup de erro | Retry da **linha atual** até 3×: fechar popup, limpar célula, re-tentar. **Não avançar.** |
+| `numero_serie` ausente na planilha | Validação pré-execução já barrou; nunca chega no runtime. Se chegar (defesa em profundidade): aborta com exit 3. |
+| Auto-preenchimento de descrição não ocorre em 3s | Warn em log, prosseguir — a planilha pode trazer o valor manual; só falha se Protheus rejeitar `Tab`. |
+| Após 3 retries da mesma linha, ainda falha | Marcar **a linha** como `status=falhou` no checkpoint, capturar evidência, **abortar a execução inteira** com exit 1. **Não pular linha** — pular linhas dentro do mesmo documento de transferência produz dado contábil incorreto. |
+| Sessão expira no meio do preenchimento | Mesma regra de F5 (re-login), porém **o documento em INCLUIR é descartado pelo Protheus** ⇒ ao re-logar, o robô deve recomeçar a F7 do passo 1, com a planilha inteira. Checkpoint guarda `numero_documento` antigo apenas para auditoria de documento órfão. |
+
+> **Diferença chave em relação a F4:** em F4, falha em técnico N **não impede** N+1 (downloads são independentes). Em F7, falha em linha N **aborta** as linhas N+1..N+M, porque todas pertencem ao mesmo documento atômico no Protheus. Esta é uma regra de produto, não técnica.
+
+#### 6.7.4 Saída
+
+- **Checkpoint:** `state/transferencia_multipla_AAAA-MM-DD.json` — modelo:
+  ```json
+  {
+    "id_execucao": "2026-05-04T10:15:33_xxx",
+    "planilha_origem": "referencias/trans_mult.xlsx",
+    "planilha_sha256": "<hash>",
+    "numero_documento": "YUXI000005MX1",
+    "linhas_total": 12,
+    "linhas_ok": 12,
+    "status": "sucesso",
+    "salvo_em": "2026-05-04T10:18:02"
+  }
+  ```
+- **Log:** mesmo sink de F1–F6, com `etapa` em `["trans_mult.abrir", "trans_mult.linha", "trans_mult.salvar"]`.
+- **Evidências de erro:** `logs/evidencias/trans_mult/<timestamp>_linha<N>.png`.
+
+#### 6.7.5 Critérios de aceite
+
+- [ ] Planilha válida com N linhas é processada e gera **um único** documento no Protheus com N linhas no grid.
+- [ ] `Numero Documento` autogerado é capturado e gravado no checkpoint **antes** do início do preenchimento das linhas.
+- [ ] Linha sem `numero_serie` na planilha provoca aborto **antes** do navegador abrir, com exit 3 e mensagem citando a linha ofensora.
+- [ ] `Quantidade` é sempre o último campo escrito por linha; navegação entre linhas usa seta ↓ (não clique).
+- [ ] Falha em qualquer linha após 3 retries aborta a execução inteira (exit 1) — robô **não** salva documento parcial.
+- [ ] Toda linha gera 1 entrada de log com `etapa=trans_mult.linha`, `linha=N`, `numero_documento=<id>`.
+- [ ] Toda falha de linha gera screenshot em `logs/evidencias/trans_mult/`.
+- [ ] Re-execução com mesmo arquivo XLSX **não cria** documento duplicado se o anterior foi salvo com sucesso (idempotência via `planilha_sha256` no checkpoint do dia).
+- [ ] Senha nunca aparece em nenhum log de F7.
+
+#### 6.7.6 Impacto na arquitetura
+
+**Reuso integral (sem mudanças):**
+- `core/navegador.py` — viewport, contexto, screenshot, downloads (não usados, mas inofensivos).
+- `core/visao.py` — template matching, OCR, multi-scale, threshold 0.70.
+- `core/log.py` — sink loguru, bind de `etapa`/`tecnico` (esta última passa a aceitar valor `"-"` ou ser substituída por `documento` no contexto F7).
+- `core/config.py` — adicionar `transferencia_xlsx_path: Path = Path("referencias/trans_mult.xlsx")` e `TRANSFERENCIA_XLSX` em `.env.example`.
+- `core/estado.py` — checkpoint (escrita atômica já existente serve igual).
+- F1 (`fazer_login`) e F2 (`navegar_ate_rotina`) em `core/acoes.py` — F2 ganha um parâmetro `rotina: Literal["mat_estoque", "trans_multipla"]` para escolher a referência (`08_*` vs `08.1_*`).
+
+**Novos arquivos:**
+
+| Arquivo | Papel |
+|---|---|
+| `core/planilha.py` | Leitura + validação do XLSX de entrada usando `openpyxl` (já é dep transitiva via XLSX, sem peso de `pandas`). Expõe `carregar_transferencias(path) -> list[LinhaTransferencia]` e levanta `PlanilhaInvalidaError` (mapeia para exit 3). |
+| `core/schema.py` (estender) | Novo modelo `LinhaTransferencia` (Pydantic) com os 20 campos da §6.7.1; `Decimal` para `quantidade`/`potencia`. Novo modelo `CheckpointTransferenciaMultipla`. |
+| `core/acoes.py` (estender) | Novas funções: `abrir_inclusao_trans_multipla(page)`, `capturar_numero_documento(page) -> str`, `preencher_linha_grid(page, linha: LinhaTransferencia) -> None`, `salvar_documento_trans_multipla(page) -> None`. Cada uma com `@retry(stop_after_attempt(3))`. |
+| `flows/transferencia_multipla.py` | Orquestrador da feature: valida planilha → F1 → F2(rotina="trans_multipla") → loop de linhas → salvar → checkpoint. Análogo a `flows/processar_lista.py`. |
+| `main.py` (estender) | Subcomando CLI: `python main.py trans-multipla [--planilha <path>]`. Padrão atual (`python main.py`) continua disparando o fluxo de download F1–F6. |
+
+**Novas exceções** (em `core/acoes.py`, mesma família de `LoginError`/`NavegacaoError`):
+- `PlanilhaInvalidaError` → exit 3, nunca tenta retry.
+- `TransferenciaIncompletaError` → exit 1, levantada após 3 retries em uma linha; carrega `numero_documento` (órfão) e `linha_falha` para o log.
+
+**Dependência adicional:** `openpyxl >= 3.1.5` em `requirements.txt` (somente leitura de XLSX; `pandas` permanece **não** listada — escolha consistente com §13.3/§13.4 de manter o stack mínimo).
+
+**Não-impacto explícito:** F3–F6 (download por técnico), F5 (recuperação de sessão) e F6 (logging/evidências) seguem inalterados; F7 é um fluxo paralelo, não uma evolução do anterior.
+
+---
+
 ## 7. Fluxos de Usuário
 
 ### 7.1 Fluxo principal — execução diária
@@ -463,6 +611,35 @@ flowchart LR
     Relog --> Resume[Retoma técnico atual]
     Detect -- não --> RetryStep[Retry da etapa]
     RetryStep --> Action
+```
+
+### 7.3 Fluxo F7 — Transferência Múltipla baseada em Planilha
+
+```mermaid
+flowchart TD
+    Start([Operador: prepara trans_mult.xlsx]) --> Run["python main.py trans-multipla"]
+    Run --> Validate[core/planilha.py<br/>valida XLSX + cabeçalho + linhas obrigatórias]
+    Validate --> ValidOk{válida?}
+    ValidOk -- não --> Exit3([Aborta exit 3])
+    ValidOk -- sim --> Login[F1 Login]
+    Login --> Nav[F2 Favoritos -> Tranf. Multipla<br/>ref08.1]
+    Nav --> Inc[Clicar +Incluir<br/>ref09.1]
+    Inc --> Cap[Capturar Numero Documento<br/>ref11.1 + grava no checkpoint]
+    Cap --> LoopStart[Foco na 1ª célula do grid<br/>ref10.1]
+    LoopStart --> FillLine[Preenche linha N:<br/>prod_orig -> ... -> numero_serie -> ... -> quantidade]
+    FillLine --> LineOk{linha aceita?}
+    LineOk -- não --> RetryLine{retries < 3?}
+    RetryLine -- sim --> FillLine
+    RetryLine -- não --> AbortAll[Marca linha falhou + screenshot<br/>aborta documento]
+    AbortAll --> Exit1([Exit 1<br/>documento NÃO salvo])
+    LineOk -- sim --> Down[Seta ↓ próxima linha]
+    Down --> More{tem próxima linha?}
+    More -- sim --> FillLine
+    More -- não --> Save[Clicar Salvar<br/>ref12.1]
+    Save --> SaveOk{salvou?}
+    SaveOk -- não --> Exit1
+    SaveOk -- sim --> Cp[Checkpoint final<br/>status=sucesso + numero_documento]
+    Cp --> End([Exit 0])
 ```
 
 ---
@@ -633,8 +810,15 @@ Não há design system próprio — o robô interage com o Protheus existente. O
 | 16 | `16_clicar_Imprimir.png` | F3 — disparar Imprimir |
 | 17 | `17_clique_Sim.png` | F3 — confirmar geração |
 | 18 | `18_aguarde_7seg_e_voltara_para_o_passo_07.png` | F3 — espera de 7s pós-download |
+| 08.1 | `08.1_Tranf._Multipla.png` | F7 — selecionar rotina "Tranf. Multipla" no menu Favoritos |
+| 09.1 | `09.1_Incluir.png` | F7 — clicar `+ Incluir` na tela `Transferencia Mod. II` |
+| 10.1 | `10.1_loop_de_materail_baseado_na_planilha.png` | F7 — grid `Transferencia Mod. II - INCLUIR` (foco da 1ª célula) |
+| 11.1 | `11.1_Salvar_codigo_do_documento.png` | F7 — capturar `Numero Documento` autogerado |
+| 12.1 | `12.1_clicar_salvar.png` | F7 — clicar `Salvar` após preencher todas as linhas |
 
 > **Nota:** o arquivo `01_link_de_acesso` no repositório está sem extensão (não é `.png`). Ao implementar `core/visao.py`, tratar este caso (renomear para `.png` ou aceitar match por nome sem extensão).
+>
+> **Convenção `*.1`:** referências da família `*.1_*.png` pertencem ao fluxo F7 (Transferência Múltipla) e **não substituem** as referências sem sufixo, que continuam servindo F1–F3 (download por técnico). Manter os dois conjuntos lado a lado.
 
 ---
 
@@ -708,6 +892,21 @@ Este projeto **não expõe API HTTP** no MVP. Integrações:
 **Por quê:** Ao final da Sprint 6 (MVP atingido), a análise de logs em produção demonstrou 0% de falhas provocadas por estado de tela irreconhecível (`"tela desconhecida"` ou `"matching falhou"` persistente sem recuperação). O protocolo manda implementar a ferramenta de IA apenas se ultrapassasse 5% de abortos críticos (PRD §8.3).
 **Trade-off:** Menor capacidade de diagnosticar mudanças completas na UI sem ver o screenshot. Aceito — a evidência via screenshot armazenada no disco já fornece contexto suficiente para o desenvolvedor manter os scripts.
 
+### 13.10 F7 aborta documento inteiro em vez de salvar parcial
+**Decisão:** Em F7, falha em qualquer linha após 3 retries provoca aborto da execução **sem salvar** o documento de transferência. Não há equivalente do "pula técnico falho e segue" de F4.
+**Por quê:** F4 é read-only (export); um técnico falho não corrompe nada — basta reprocessar. F7 é write — um documento de transferência salvo com 11 de 12 linhas é dado contábil errado em produção, e desfazer exige operador humano abrindo o Protheus para cancelar/estornar. Salvar parcial transfere o custo de erro do robô para o operador. Inverter: aborto cedo, sem registro persistente no Protheus.
+**Trade-off:** Uma única linha mal-formada bloqueia toda a planilha. Mitigação: validação pré-execução (§6.7.1) detecta a maior parte dos erros antes do navegador abrir; o que resta são erros do próprio Protheus (saldo, produto inexistente), que de qualquer forma exigem ação humana.
+
+### 13.11 `openpyxl` em vez de `pandas` para leitura da planilha
+**Decisão:** Usar `openpyxl` direto, sem `pandas`.
+**Por quê:** A leitura é estritamente sequencial (linha-a-linha), o volume é pequeno (dezenas de linhas), e o checkpoint usa `Decimal` para `quantidade`/`potencia` — exatamente o caso em que `pandas` (que joga tudo para `float64`) atrapalha. `pandas` adiciona ~50MB de deps e BLAS, sem benefício para o caso.
+**Trade-off:** Se um dia houver agregações ou múltiplas abas, `pandas` ficaria conveniente. Aceito — refatorar quando o caso aparecer, não preventivamente.
+
+### 13.12 `Quantidade` como último campo escrito por linha
+**Decisão:** A ordem de preenchimento dos campos do grid é fixa, com `quantidade` sempre por último, encerrada com `Enter`/`Tab` final.
+**Por quê:** Comportamento observado no Protheus: ao digitar valor em `Quantidade` e confirmar, o foco salta para a primeira coluna da próxima linha. Tentar usar essa transição como confirmação de linha + avanço de cursor é mais robusto do que clicar manualmente em cada célula da próxima linha.
+**Trade-off:** Acopla a implementação a uma regra de UI do Protheus que pode mudar com upgrade. Mitigação: `core/acoes.py::preencher_linha_grid` isola a regra; mudança de comportamento é localizada.
+
 ---
 
 ## 14. Glossário
@@ -727,6 +926,10 @@ Este projeto **não expõe API HTTP** no MVP. Integrações:
 | **Headless** | Modo do navegador sem janela gráfica (mais rápido, sem display necessário) |
 | **Viewport** | Dimensão lógica da janela do navegador — fixar em 1366×768 garante reprodutibilidade dos prints |
 | **Idempotência** | Propriedade de poder executar a mesma operação N vezes com o mesmo efeito de 1 vez (re-execuções não duplicam downloads) |
+| **Tranf. Multipla** | Rotina do módulo Estoque/Custos do Protheus que cria um único documento contendo várias linhas de transferência de material entre armazéns/produtos. Alvo da feature F7. |
+| **Numero Documento** | Identificador autogerado pelo Protheus ao abrir uma nova Transferência Múltipla (ex.: `YUXI000005MX1`). Persistido no checkpoint para auditoria mesmo em caso de aborto. |
+| **Documento órfão** | Documento de transferência aberto no Protheus mas não salvo (porque o robô abortou no meio do preenchimento). Não persiste no banco do ERP, mas o número fica registrado em log para o operador conferir manualmente. |
+| **Linha do grid** | Cada linha do grid `Transferencia Mod. II - INCLUIR`, equivalente a uma linha da planilha de entrada. |
 
 ---
 

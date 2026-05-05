@@ -82,3 +82,71 @@
 - [x] Limpeza de TODOs e dead code
 
 ---
+
+## F7 — Transferência Múltipla baseada em Planilha (Sprints 9-12)
+
+> Implementa PRD §6.7. Reaproveita F1 (login) e F2 (com novo parâmetro de rotina); **não substitui** F1–F6. Cada sprint termina com demo manual contra Protheus real e screenshot de evidência preservado em `logs/evidencias/trans_mult/`.
+
+### Sprint 9 — Planilha: leitura, schema e validação pré-execução
+**Objetivo:** dado um caminho de XLSX, retornar `list[LinhaTransferencia]` validado ou abortar com exit 3 e mensagem citando linha/coluna ofensora — **sem abrir o navegador**. Sprint não toca Protheus; testável com fixtures de XLSX.
+- [ ] Adicionar `openpyxl>=3.1.5` em `requirements.txt` (PRD §13.11)
+- [ ] Criar `referencias/trans_mult.xlsx` com cabeçalho real (20 colunas da PRD §6.7.1) — arquivo atual está com 0 bytes; preencher com 1 linha de exemplo válida + commit
+- [ ] Estender `core/config.py` com `transferencia_xlsx_path: Path = Path("referencias/trans_mult.xlsx")` e `TRANSFERENCIA_XLSX` em `.env.example`
+- [ ] Estender `core/schema.py` com modelo `LinhaTransferencia` (Pydantic) — 20 campos da PRD §6.7.1; `Decimal` (não `float`) para `quantidade` e `potencia`; `validade` como `date` opcional formato `dd/mm/aaaa`; `numero_serie` obrigatório com `min_length=1`
+- [ ] Estender `core/schema.py` com modelo `CheckpointTransferenciaMultipla` (campos da PRD §6.7.4)
+- [ ] Estender `core/schema.py` com dataclass/modelo `PlanilhaCarregada(linhas: list[LinhaTransferencia], sha256: str, caminho: Path)` — retorno unificado de `carregar_transferencias`
+- [ ] Criar `core/planilha.py` com `carregar_transferencias(path: Path) -> PlanilhaCarregada`
+- [ ] Em `core/planilha.py`: validar `zipfile.is_zipfile(path)` antes de abrir (mesma checagem de F3) — falha ⇒ `PlanilhaInvalidaError`
+- [ ] Em `core/planilha.py`: normalizar nomes de cabeçalho da primeira aba — case-insensitive, remover espaços/pontos/underscores (`Prod.Orig.` ≡ `prod orig` ≡ `PROD_ORIG`)
+- [ ] Em `core/planilha.py`: rejeitar planilha se faltar qualquer coluna obrigatória (✅ em PRD §6.7.1) — erro lista as colunas faltantes
+- [ ] Em `core/planilha.py`: para cada linha de dado, validar que `prod_orig`, `armazem_orig`, `prod_destino`, `armazem_destino`, `numero_serie`, `quantidade` são não-vazios; `quantidade` parseável como `Decimal` — erro cita linha (1-indexed, descontando cabeçalho) e coluna
+- [ ] Em `core/planilha.py`: calcular SHA-256 do arquivo bruto e popular `PlanilhaCarregada.sha256` — usado pela idempotência da Sprint 12
+- [ ] Adicionar exceção `PlanilhaInvalidaError(Exception)` em `core/acoes.py` (mesma família de `LoginError`/`NavegacaoError`); `main.py` mapeia para exit 3
+- [ ] **Demo:** rodar `core/planilha.py` (script ad-hoc ou via REPL) contra 3 fixtures: (a) planilha boa de 5 linhas — retorna 5 modelos válidos; (b) planilha com `numero_serie` vazio na linha 3 — `PlanilhaInvalidaError` cita "linha 3, coluna numero_serie"; (c) planilha com `quantidade="abc"` na linha 2 — erro cita "linha 2, coluna quantidade não-decimal".
+
+### Sprint 10 — Navegação F2 multi-rotina + abrir Inclusão + capturar Numero Documento
+**Objetivo:** robô loga, navega até `Tranf. Multipla`, abre o formulário de inclusão e lê o `Numero Documento` autogerado, persistindo-o no checkpoint **antes** de tocar no grid. Testável com planilha vazia (não preenche linhas).
+- [ ] Refatorar `acoes.py::navegar_ate_rotina()` para aceitar `rotina: Literal["mat_estoque", "trans_multipla"] = "mat_estoque"` — default mantém comportamento atual
+- [ ] Mapear referências por rotina: `mat_estoque` → `08_clicar_Mat_Estoque_Por_Tecnico.png`; `trans_multipla` → `08.1_Tranf._Multipla.png` (PRD §10.3)
+- [ ] Após selecionar `trans_multipla`, fluxo segue **diferente** do `mat_estoque`: não há diálogo "Confirmar" nem popup "7 dias" — `navegar_ate_rotina` deve ramificar e parar quando a tela `Transferencia Mod. II` (com botão `+ Incluir`) estiver visível [ref09.1]
+- [ ] Criar `acoes.py::abrir_inclusao_trans_multipla(page)` — clica `+ Incluir` via template matching em `09.1_Incluir.png`; valida via OCR do cabeçalho que o título mudou para `Transferencia Mod. II - INCLUIR` antes de retornar; envolto em `@retry(stop_after_attempt(3), wait=wait_exponential(...))`
+- [ ] Criar `acoes.py::capturar_numero_documento(page) -> str` — preferência DOM (`input` adjacente ao label "Numero Documento", varrendo `[page, *page.frames]`); fallback OCR em região fixa relativa ao cabeçalho [ref11.1]; resultado precisa casar regex `^[A-Z0-9]{10,15}$` (formato observado: `YUXI000005MX1`) — caso contrário levanta `NavegacaoError`
+- [ ] Em `flows/transferencia_multipla.py` (esqueleto inicial): após capturar o número, gravar **imediatamente** em `state/transferencia_multipla_AAAA-MM-DD.json` via `core/estado.py` (escrita atômica) com `status="em_andamento"`, `numero_documento`, `iniciada_em`, `planilha_sha256` — antes de qualquer interação com o grid (PRD §6.7.2 passo 2)
+- [ ] Logging: `log.bind(etapa="trans_mult.abrir", documento=numero).info(...)` — campo `tecnico` recebe `"-"` neste fluxo (PRD §6.7.6)
+- [ ] **Demo:** `python main.py trans-multipla --planilha <fixture_vazia.xlsx>` ⇒ robô loga, navega até `Tranf. Multipla`, abre INCLUIR, captura o número (ex.: `YUXI000005MX1`), grava no checkpoint, sai com exit 0 sem preencher nada. Verificar arquivo de checkpoint contém o número correto. Validar manualmente no Protheus que **nenhum documento foi salvo** (já que não houve clique em Salvar).
+
+### Sprint 11 — Preencher uma linha do grid + retry por linha + evidências
+**Objetivo:** dado um `LinhaTransferencia`, preencher os 20 campos do grid na ordem correta com `Quantidade` por último, recuperar de erros por retry de linha (3×) e abortar a execução inteira após esgotar. Testável com planilha de 1 linha.
+- [ ] Criar `acoes.py::preencher_linha_grid(page, linha: LinhaTransferencia)` — ordem fixa de campos da PRD §6.7.2 passo 4; `Tab` entre campos; **`quantidade` por último, encerrado com `Enter`** (PRD §13.12)
+- [ ] Pular campos opcionais vazios (não digitar nada, **não** pressionar Tab vazio — preservar o foco na próxima coluna obrigatória)
+- [ ] Após digitar `prod_orig` + Tab: aguardar até 3s pelo auto-preenchimento de `desc_orig`/`um_orig`. Se a planilha trouxe valor explícito divergente do auto-preenchido, sobrescrever; se nada vier em 3s, log warning e prosseguir (PRD §6.7.3)
+- [ ] Detectar popup de erro do Protheus após qualquer campo: comparar screenshot com referência genérica de modal de erro (capturar uma e adicionar como `referencias/19.1_popup_erro_protheus.png` quando aparecer pela 1ª vez no demo) ou OCR do cabeçalho de modal — se detectado, fechar via `Esc`/clicar X, levantar `NavegacaoError`
+- [ ] Decorar `preencher_linha_grid` com `@retry(stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=10))` — antes de cada retry, limpar a linha com `Esc` ou `Ctrl+A`+`Del` para reiniciar do estado limpo
+- [ ] Após esgotar 3 tentativas: criar exceção `TransferenciaIncompletaError(numero_documento, linha_index)` em `acoes.py` e re-levantar; orquestrador (Sprint 12) mapeia para exit 1
+- [ ] Em qualquer falha (incluindo entre retries): `tirar_screenshot(page, etapa=f"trans_mult.linha{N}")` salvando em `logs/evidencias/trans_mult/<timestamp>_linha<N>.png` — criar a subpasta na primeira chamada
+- [ ] Logging por linha: ao **entrar** em `preencher_linha_grid` ⇒ `log.bind(etapa="trans_mult.linha", linha=N, documento=numero).info("preenchendo")`; ao concluir com sucesso ⇒ `.info("ok")`; em falha após retries ⇒ `.error(erro_msg)`
+- [ ] **Demo (parte 1 — happy path):** preparar planilha de 1 linha com produto/armazém válidos no ambiente Protheus. Rodar end-to-end (sem chamar Salvar — apenas até o `Enter` da quantidade). Verificar no Protheus que o cursor pulou para a linha 2 do grid. Cancelar a tela.
+- [ ] **Demo (parte 2 — falha esperada):** preparar planilha de 1 linha com `prod_orig` inexistente. Rodar; observar 3 tentativas com popup do Protheus, cada uma gerando screenshot em `logs/evidencias/trans_mult/`. Robô aborta com `TransferenciaIncompletaError`, exit 1. Validar manualmente que o documento INCLUIR foi descartado (não persistiu no Protheus).
+
+### Sprint 12 — Orquestrador end-to-end: loop + Salvar + checkpoint + idempotência + CLI
+**Objetivo:** comando único `python main.py trans-multipla` lê planilha de N linhas, processa todas, salva o documento no Protheus, atualiza o checkpoint final e respeita idempotência por `planilha_sha256`. Testável com planilha real de 5+ linhas.
+- [ ] Criar `acoes.py::salvar_documento_trans_multipla(page)` — clica `Salvar` via `12.1_clicar_salvar.png` (PRD §10.3); aguarda até 30s por uma das condições: (a) volta ao grid `Transferencia Mod. II` com nova linha, OR (b) popup de sucesso, OR (c) modal de erro
+- [ ] Em caso de modal de erro pós-`Salvar`: OCR do texto do modal, log `error`, screenshot em `logs/evidencias/trans_mult/<ts>_salvar.png`, levantar `TransferenciaIncompletaError(numero_documento, linha_index=-1)` ⇒ exit 1
+- [ ] Implementar `flows/transferencia_multipla.py` orquestrador completo (substituindo o esqueleto da Sprint 10):
+  1. `carregar_transferencias(planilha_path)` ⇒ `(linhas, sha256)`; falha ⇒ exit 3 antes de abrir navegador
+  2. **Idempotência:** ler `state/transferencia_multipla_AAAA-MM-DD.json` do dia. Se existir com `planilha_sha256` igual e `status="sucesso"` ⇒ logar e sair com exit 0 sem abrir navegador (PRD §6.7.5 último critério)
+  3. F1 (login) → F2 (`rotina="trans_multipla"`) → `abrir_inclusao_trans_multipla` → `capturar_numero_documento` → grava checkpoint inicial (Sprint 10 já cobre)
+  4. Foco na 1ª célula do grid via clique em `10.1_loop_de_materail_baseado_na_planilha.png`
+  5. Loop por `linhas`: para cada `linha_n`, chamar `preencher_linha_grid(page, linha_n)`; após retorno bem-sucedido, pressionar seta `↓` (PRD §6.7.2 — navegação entre linhas é por seta, **não por clique**); validar via screenshot que cursor está na coluna `Prod.Orig.` da linha N+1
+  6. Após última linha confirmada: `salvar_documento_trans_multipla(page)`
+  7. Atualizar checkpoint final: `status="sucesso"`, `linhas_total=N`, `linhas_ok=N`, `salvo_em=<ts ISO>`
+- [ ] Tratamento de sessão expirada durante o loop (integrar com F5): re-login + **abortar a F7 inteira com exit 1** (não retomar — o documento INCLUIR foi descartado pelo Protheus, PRD §6.7.3 última linha). Checkpoint mantém `numero_documento` antigo como órfão para auditoria
+- [ ] Estender `main.py` com subcomando `trans-multipla [--planilha <path>]` via `argparse`; comando default sem argumento continua disparando `flows/processar_lista.py` (F1–F6) — não regredir
+- [ ] Adicionar exit codes mapeados ao novo fluxo: `PlanilhaInvalidaError` ⇒ 3, `TransferenciaIncompletaError` ⇒ 1, `CredenciaisInvalidasError` ⇒ 2 (já existente), sucesso ⇒ 0
+- [ ] Resumo final no terminal estilo F1–F6: cabeçalho `robo-totvs — Transferência Múltipla`, progresso `[N/Total]` por linha, e bloco final `RESUMO documento: YUXI...  linhas: N/N  duração: MM:SS`
+- [ ] Atualizar `CLAUDE.md` (seção "Setup & commands") com o novo subcomando — apenas linha de exemplo; **não** descrever arquitetura que já vive no PRD
+- [ ] **Demo (happy path):** planilha real de 5 linhas válidas no ambiente Protheus. Rodar `python main.py trans-multipla`. Validar no Protheus que documento `<numero>` existe com 5 linhas no grid. Conferir checkpoint do dia tem `status=sucesso`, `linhas_ok=5`, `numero_documento` correto, `planilha_sha256` populado.
+- [ ] **Demo (idempotência):** rodar o **mesmo comando, mesma planilha** 1 minuto depois. Robô deve sair com exit 0 sem abrir navegador, logando "planilha já processada hoje (sha256 igual)". Confirmar no Protheus que continua existindo só **um** documento.
+- [ ] **Demo (recuperação de sessão):** preparar planilha de 5 linhas; durante o preenchimento da linha 3 (operador derruba a sessão manualmente no Protheus). Robô detecta logout, aborta com exit 1, screenshot salvo, checkpoint marca o `numero_documento` como órfão. Validar manualmente no Protheus que **nenhum** documento parcial foi salvo.
+
+---
