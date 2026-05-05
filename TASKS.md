@@ -98,11 +98,11 @@
 - [x] Criar `core/planilha.py` com `carregar_transferencias(path: Path) -> PlanilhaCarregada`
 - [x] Em `core/planilha.py`: validar `zipfile.is_zipfile(path)` antes de abrir (mesma checagem de F3) — falha ⇒ `PlanilhaInvalidaError`
 - [x] Em `core/planilha.py`: normalizar nomes de cabeçalho da primeira aba — case-insensitive, remover espaços/pontos/underscores (`Prod.Orig.` ≡ `prod orig` ≡ `PROD_ORIG`)
-- [ ] Em `core/planilha.py`: rejeitar planilha se faltar qualquer coluna obrigatória (✅ em PRD §6.7.1) — erro lista as colunas faltantes
-- [ ] Em `core/planilha.py`: para cada linha de dado, validar que `prod_orig`, `armazem_orig`, `prod_destino`, `armazem_destino`, `numero_serie`, `quantidade` são não-vazios; `quantidade` parseável como `Decimal` — erro cita linha (1-indexed, descontando cabeçalho) e coluna
-- [ ] Em `core/planilha.py`: calcular SHA-256 do arquivo bruto e popular `PlanilhaCarregada.sha256` — usado pela idempotência da Sprint 12
-- [ ] Adicionar exceção `PlanilhaInvalidaError(Exception)` em `core/acoes.py` (mesma família de `LoginError`/`NavegacaoError`); `main.py` mapeia para exit 3
-- [ ] **Demo:** rodar `core/planilha.py` (script ad-hoc ou via REPL) contra 3 fixtures: (a) planilha boa de 5 linhas — retorna 5 modelos válidos; (b) planilha com `numero_serie` vazio na linha 3 — `PlanilhaInvalidaError` cita "linha 3, coluna numero_serie"; (c) planilha com `quantidade="abc"` na linha 2 — erro cita "linha 2, coluna quantidade não-decimal".
+- [x] Em `core/planilha.py`: rejeitar planilha se faltar qualquer coluna obrigatória (✅ em PRD §6.7.1) — erro lista as colunas faltantes
+- [x] Em `core/planilha.py`: para cada linha de dado, validar que `prod_orig`, `armazem_orig`, `prod_destino`, `armazem_destino`, `numero_serie`, `quantidade` são não-vazios; `quantidade` parseável como `Decimal` — erro cita linha (1-indexed, descontando cabeçalho) e coluna
+- [x] Em `core/planilha.py`: calcular SHA-256 do arquivo bruto e popular `PlanilhaCarregada.sha256` — usado pela idempotência da Sprint 12
+- [x] Adicionar exceção `PlanilhaInvalidaError(Exception)` em `core/acoes.py` (mesma família de `LoginError`/`NavegacaoError`); `main.py` mapeia para exit 3
+- [x] **Demo:** rodar `core/planilha.py` (script ad-hoc ou via REPL) contra 3 fixtures: (a) planilha boa de 5 linhas — retorna 5 modelos válidos; (b) planilha com `numero_serie` vazio na linha 3 — `PlanilhaInvalidaError` cita "linha 3, coluna numero_serie"; (c) planilha com `quantidade="abc"` na linha 2 — erro cita "linha 2, coluna quantidade não-decimal".
 
 ### Sprint 10 — Navegação F2 multi-rotina + abrir Inclusão + capturar Numero Documento
 **Objetivo:** robô loga, navega até `Tranf. Multipla`, abre o formulário de inclusão e lê o `Numero Documento` autogerado, persistindo-o no checkpoint **antes** de tocar no grid. Testável com planilha vazia (não preenche linhas).

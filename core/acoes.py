@@ -34,6 +34,10 @@ class CredenciaisInvalidasError(Exception):
     """Credenciais rejeitadas pelo Protheus — não retentar."""
 
 
+class PlanilhaInvalidaError(Exception):
+    """Planilha de Transferência Múltipla inválida — mapeia para exit 3."""
+
+
 def _clicar_ok_programa_inicial(page: Page) -> bool:
     """Passo 02 — diálogo 'Programa Inicial / Ambiente / OK'.
 
