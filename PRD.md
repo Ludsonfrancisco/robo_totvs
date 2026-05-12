@@ -2,9 +2,9 @@
 
 > **Documento de requisitos do produto (PRD)**
 > Fonte única de verdade. Toda decisão técnica, sprint ou prompt subsequente deve referenciar este arquivo.
-> **Versão:** 1.7 — 2026-05-04
+> **Versão:** 1.8 — 2026-05-10
 > **Autor:** Ludson Francisco
-> **Status:** Pronto para Produção (Sprints 1-8 Concluídas) · F7 (Transferência Múltipla) em planejamento
+> **Status:** Pronto para Produção (Sprints 1-8 Concluídas + hotfix 8.1 "Limite de Conexões") · F7 (Transferência Múltipla) em planejamento
 
 ---
 
@@ -405,6 +405,52 @@ robo-totvs/
 
 ---
 
+### 6.5.1 F5.1 — Tratamento do modal "Limite de Conexões do Usuário Excedido"
+
+> **Status:** novo escopo (v1.8) — hotfix da Sprint 8.1. Sub-feature de F5 (recuperação de sessão).
+
+**Descrição:** O Protheus mantém um teto de sessões simultâneas por usuário (licença/concorrência). Quando o robô bate nesse teto — tipicamente por sessões fantasma de execuções anteriores que ainda não expiraram no servidor — o ERP injeta um modal HTML bloqueante:
+
+> **Help: HELP**
+> **Problema: Limite de conexoes do Usuario excedido**
+> *[Fechar]*
+
+Sem tratamento explícito, o robô interpretava o modal como "tela desconhecida": o template matching falhava em Favoritos (score 0.092 vs threshold 0.65), o `_preparar_para_proximo` retornava `False`, e o orquestrador marcava **todos os técnicos restantes como falha silenciosa** (incidente real em 2026-05-10: 14 técnicos não-tentados — incluindo armazéns CT e DJ no fim da lista — contabilizados como "falha"; ver `DOCS.md` Sprint 8.1).
+
+**Fluxo de tratamento:**
+
+1. **Detecção** (`core/acoes.py::detectar_limite_conexoes`): a cada iteração do loop e dentro de `_preparar_para_proximo`, verifica via DOM em todos os frames:
+   - Texto regex `/Limite de conex[oõ]es/i`.
+   - Heurística secundária: cabeçalho `/Help.*HELP/i` + botão `Fechar` visíveis no mesmo frame.
+2. **Tentativa de fechamento** (`fechar_modal_limite_conexoes`): clica `button:has-text("Fechar")` via DOM (fallback `Enter`).
+3. **Re-verificação**: após `Fechar`, se o modal voltar a aparecer (servidor continua recusando), o robô levanta `SessaoEsgotadaError` — **não** insiste em re-logar (re-login imediato falharia com a mesma rejeição).
+4. **Re-login condicional**: se o modal sumiu, executa `fazer_login` + `navegar_ate_rotina`. Falha de re-login (`CredenciaisInvalidasError`/`NavegacaoError`) é convertida em `SessaoEsgotadaError`.
+5. **Aborto limpo**: `SessaoEsgotadaError` sobe até `main.py` → **exit code 2** com mensagem instruindo o operador a pedir ao admin do Protheus para encerrar as sessões fantasma (Monitor de Conexões / APSDU) e rodar novamente. **Sem `--reset`**, o checkpoint preserva os técnicos pendentes e a re-execução retoma de onde parou.
+
+**Contraste com F5:**
+
+| Cenário | F5 (logout normal) | F5.1 (limite de conexões) |
+|---|---|---|
+| Sintoma na tela | Tela de login visível | Modal HELP + botão Fechar |
+| Causa | Timeout server-side da sessão | Teto de sessões simultâneas por usuário |
+| Recuperação automática | Re-login no mesmo run | **Não** — exige ação humana (admin) |
+| Estado dos técnicos restantes | Continuam após re-login | Permanecem `pendente` no checkpoint |
+| Exit code | 0 ou 1 | **2** |
+
+**Regra crítica de contagem (anti-falha-silenciosa):**
+
+Antes deste hotfix, ao abortar o loop por irrecuperabilidade, `processar_lista` fazia `falha += (total - idx)` — inflando o número de falhas com técnicos jamais tentados. Após v1.8, quando o aborto é por `SessaoEsgotadaError`, os técnicos não-tentados **não** são contabilizados como falha; permanecem `pendente` no checkpoint. Isso preserva a semântica de "falha" (tentativa que não baixou XLSX) e habilita retomada idempotente sem `--retry-falhos`.
+
+**Critérios de aceite:**
+
+- [ ] Modal "Limite de conexões" injetado mid-loop é detectado em < 1 ciclo e fechado via DOM.
+- [ ] Modal persistente após `Fechar` ⇒ aborto com `SessaoEsgotadaError` → exit 2 e mensagem citando ação do admin.
+- [ ] Técnicos restantes após aborto por F5.1 ficam `pendente` no checkpoint (não `falhou`).
+- [ ] Re-execução sem `--reset` retoma exatamente nos técnicos pendentes.
+- [ ] Resumo final reflete apenas as tentativas reais — não conta não-tentados como falha.
+
+---
+
 ### 6.6 F6 — Logging e Evidências
 
 **Descrição:** Rastreabilidade completa da execução.
@@ -733,7 +779,7 @@ TECNICOS_JSON=data/lote_b.json python main.py
 |---|---|
 | 0 | Todos os técnicos baixados |
 | 1 | Concluído com falhas individuais (parciais) |
-| 2 | Aborto crítico (falha de login, sessão irrecuperável) |
+| 2 | Aborto crítico (credenciais inválidas, sessão irrecuperável, **limite de conexões do Protheus excedido — ver F5.1**) |
 | 3 | Erro de configuração (JSON inválido, env vars faltando) |
 
 ---
@@ -902,6 +948,16 @@ Este projeto **não expõe API HTTP** no MVP. Integrações:
 **Por quê:** A leitura é estritamente sequencial (linha-a-linha), o volume é pequeno (dezenas de linhas), e o checkpoint usa `Decimal` para `quantidade`/`potencia` — exatamente o caso em que `pandas` (que joga tudo para `float64`) atrapalha. `pandas` adiciona ~50MB de deps e BLAS, sem benefício para o caso.
 **Trade-off:** Se um dia houver agregações ou múltiplas abas, `pandas` ficaria conveniente. Aceito — refatorar quando o caso aparecer, não preventivamente.
 
+### 13.13 Limite de conexões do Protheus: aborto duro em vez de tentar contornar
+**Decisão:** Quando o modal "Limite de conexoes do Usuario excedido" aparece e persiste após `Fechar`, o robô levanta `SessaoEsgotadaError` e termina com exit 2. **Não** insistimos em re-logar, não esperamos timeout no servidor, não trocamos de usuário.
+**Por quê:** O modal é sinal de um problema de licença/ambiente (sessões fantasma do próprio robô, ou outro processo no mesmo usuário), não de transiente recuperável. Re-login imediato cai no mesmo erro porque o servidor ainda enxerga as sessões antigas. Esperar timeout (`>30 min`) trava o operador sem visibilidade do que está acontecendo. Aborto cedo + mensagem que aponta a ação correta (pedir ao admin para matar as sessões) tem ROI muito maior do que qualquer tentativa de auto-cura.
+**Trade-off:** Se um dia o servidor recuperar sozinho em poucos segundos, o robô vai abortar prematuramente. Mitigação: a re-execução é idempotente (checkpoint preserva pendentes) — basta o operador rodar de novo após resolver a causa. Em produção (Sprint 8.1) esse fluxo manual leva < 2 min e dá visibilidade do problema raiz, em vez de mascarar com retries.
+
+### 13.14 Técnicos não-tentados ficam `pendente`, não `falhou`
+**Decisão:** Quando o loop aborta por `SessaoEsgotadaError`, os técnicos que ainda não foram tentados **não** são contados como falha — permanecem com status `pendente` no checkpoint.
+**Por quê:** "Falha" tem semântica específica no checkpoint (= tentativa real que não baixou XLSX, elegível para `--retry-falhos`). Contar não-tentados como falha mascara a real taxa de erro do robô e força o operador a usar `--retry-falhos` para retomar — o que reprocessa também as falhas verdadeiras. Manter como `pendente` permite retomada idempotente simples (`python main.py` sem flags) e relatórios honestos. O bug original (Sprint 8.1) reportava "14 falhas" quando na verdade eram 0 falhas reais + 14 não-tentados.
+**Trade-off:** Resumo final agora pode mostrar `total != sucesso + falha + pulados` quando há aborto. Aceito — o operador prefere a verdade ("aborto após 19 OK, 14 pendentes") a uma simetria contábil falsa ("19 OK, 14 falha").
+
 ### 13.12 `Quantidade` como último campo escrito por linha
 **Decisão:** A ordem de preenchimento dos campos do grid é fixa, com `quantidade` sempre por último, encerrada com `Enter`/`Tab` final.
 **Por quê:** Comportamento observado no Protheus: ao digitar valor em `Quantidade` e confirmar, o foco salta para a primeira coluna da próxima linha. Tentar usar essa transição como confirmação de linha + avanço de cursor é mais robusto do que clicar manualmente em cada célula da próxima linha.
@@ -930,6 +986,9 @@ Este projeto **não expõe API HTTP** no MVP. Integrações:
 | **Numero Documento** | Identificador autogerado pelo Protheus ao abrir uma nova Transferência Múltipla (ex.: `YUXI000005MX1`). Persistido no checkpoint para auditoria mesmo em caso de aborto. |
 | **Documento órfão** | Documento de transferência aberto no Protheus mas não salvo (porque o robô abortou no meio do preenchimento). Não persiste no banco do ERP, mas o número fica registrado em log para o operador conferir manualmente. |
 | **Linha do grid** | Cada linha do grid `Transferencia Mod. II - INCLUIR`, equivalente a uma linha da planilha de entrada. |
+| **Limite de conexões do Usuário** | Teto de sessões simultâneas por usuário imposto pela licença do Protheus. Quando atingido, o ERP injeta um modal HELP bloqueante; o robô detecta e aborta com exit 2 (ver F5.1, §13.13). |
+| **Sessão fantasma** | Sessão server-side do Protheus que ficou aberta mesmo após o robô fechar o navegador (não houve logout explícito). Acumula-se a cada execução abortada, eventualmente atingindo o "Limite de conexões do Usuário". Mitigação atual: ação do admin via Monitor de Conexões. |
+| **Técnico pendente vs falho** | `pendente` = não tentado ainda (ou aborto sistêmico antes da vez dele); `falho` = tentado, mas o XLSX não foi entregue após 3 retries. Apenas `falho` é elegível para `--retry-falhos` (ver §13.14). |
 
 ---
 

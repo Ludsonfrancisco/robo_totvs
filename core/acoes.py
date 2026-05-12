@@ -40,6 +40,16 @@ class CredenciaisInvalidasError(Exception):
     """Credenciais rejeitadas pelo Protheus — não retentar."""
 
 
+class SessaoEsgotadaError(Exception):
+    """Protheus rejeitou novas sessões (modal 'Limite de conexoes do Usuario excedido').
+
+    Não é credencial inválida — é teto de licença/sessões do servidor. Tentar
+    re-logar imediatamente costuma falhar (o servidor ainda enxerga as sessões
+    órfãs do robô). Mapeia para exit 2 e o operador precisa pedir ao admin
+    para encerrar as sessões fantasma antes de re-rodar.
+    """
+
+
 class PlanilhaInvalidaError(Exception):
     """Planilha de Transferência Múltipla inválida — mapeia para exit 3."""
 
@@ -404,6 +414,83 @@ def validar_esta_na_home(page: Page) -> bool:
         return True
         
     return False
+
+def detectar_limite_conexoes(page: Page) -> bool:
+    """Detecta o modal 'Help: HELP — Problema: Limite de conexoes do Usuario excedido'.
+
+    Esse modal é levantado pelo Protheus quando o teto de sessões por usuário
+    é atingido. Aparece como diálogo HTML modal com botão `Fechar`. Quando
+    presente, qualquer navegação subsequente trava — daí precisar tratar antes
+    de tentar re-logar/re-navegar.
+
+    Heurística:
+    1. DOM: texto 'Limite de conex' ou cabeçalho 'Help: HELP' visível.
+    2. Fallback: combinação 'Help' + botão 'Fechar' no mesmo frame.
+    """
+    marcadores = [
+        'text=/Limite de conex[oõ]es/i',
+        'text="Limite de conexoes do Usuario excedido"',
+        'text="Limite de conexões do Usuário excedido"',
+    ]
+    for ctx in [page, *page.frames]:
+        for sel in marcadores:
+            try:
+                if ctx.locator(sel).first.is_visible(timeout=300):
+                    log.bind(etapa="sessao").warning(
+                        "Modal 'Limite de conexões do Usuário excedido' detectado"
+                    )
+                    return True
+            except Exception:
+                continue
+
+    # Heurística secundária: cabeçalho Help + botão Fechar (alguns ambientes
+    # truncam o texto do problema).
+    for ctx in [page, *page.frames]:
+        try:
+            tem_help = ctx.locator('text=/Help.*HELP/i').first.is_visible(timeout=200)
+            tem_fechar = ctx.locator('button:has-text("Fechar")').first.is_visible(timeout=200)
+            if tem_help and tem_fechar:
+                log.bind(etapa="sessao").warning(
+                    "Modal Help do Protheus detectado (provável limite de conexões)"
+                )
+                return True
+        except Exception:
+            continue
+
+    return False
+
+
+def fechar_modal_limite_conexoes(page: Page) -> bool:
+    """Fecha o modal de limite de conexões clicando em 'Fechar'.
+
+    Retorna True se conseguiu clicar; False caso contrário. Não verifica se o
+    modal sumiu (responsabilidade de quem chama, que normalmente tenta
+    re-logar logo em seguida).
+    """
+    seletores = [
+        'button:has-text("Fechar"):not([disabled])',
+        'button:has-text("Fechar")',
+        '[title="Fechar"]',
+    ]
+    for ctx in [page, *page.frames]:
+        for sel in seletores:
+            try:
+                loc = ctx.locator(sel).first
+                if loc.is_visible(timeout=500):
+                    loc.click()
+                    log.bind(etapa="sessao").info(f"Modal 'Fechar' clicado via DOM ({sel})")
+                    return True
+            except Exception:
+                continue
+
+    try:
+        page.keyboard.press("Enter")
+        log.bind(etapa="sessao").info("Modal 'Fechar' acionado via Enter (fallback)")
+        return True
+    except Exception as e:
+        log.bind(etapa="sessao").warning(f"Falha ao acionar Fechar via teclado: {e}")
+        return False
+
 
 def fazer_login(page: Page) -> None:
     """Executa login com retry (3x, backoff exponencial).

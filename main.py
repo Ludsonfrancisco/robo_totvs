@@ -18,7 +18,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from core.acoes import CredenciaisInvalidasError, PlanilhaInvalidaError, TransferenciaIncompletaError, fazer_login, navegar_ate_rotina
+from core.acoes import CredenciaisInvalidasError, PlanilhaInvalidaError, SessaoEsgotadaError, TransferenciaIncompletaError, fazer_login, navegar_ate_rotina
 from core.log import log
 from core.navegador import iniciar_navegador
 from flows.processar_lista import processar_lista
@@ -100,6 +100,14 @@ def main(argv: list[str] | None = None) -> int:
                 )
         except CredenciaisInvalidasError:
             log.bind(etapa="main").error("Abortando por credenciais inválidas.")
+            return 2
+        except SessaoEsgotadaError as e:
+            log.bind(etapa="main").error(
+                f"Abortando: limite de conexões do Protheus excedido. "
+                f"Peça ao admin para encerrar as sessões fantasma do seu usuário "
+                f"(Monitor de Conexões / APSDU) e rode novamente — sem --reset, "
+                f"o robô retoma de onde parou. Detalhe: {e}"
+            )
             return 2
         except PlanilhaInvalidaError as e:
             log.bind(etapa="main").error(f"Erro de validação na planilha: {e}")

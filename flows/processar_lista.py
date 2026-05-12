@@ -12,9 +12,12 @@ from core.acoes import (
     navegar_ate_rotina,
     fazer_login,
     detectar_logout,
+    detectar_limite_conexoes,
+    fechar_modal_limite_conexoes,
     validar_esta_na_home,
     CredenciaisInvalidasError,
     NavegacaoError,
+    SessaoEsgotadaError,
 )
 from core.log import log
 from core.visao import aguardar_imagem
@@ -75,6 +78,34 @@ def _preparar_para_proximo(page: Page, code_anterior: str) -> bool:
             "Tela da rotina pronta para o próximo técnico"
         )
         return True
+
+    # 1.5. Modal "Limite de conexões do Usuário excedido" — Protheus matou a
+    # sessão. Tentar fechar o modal e re-logar; se ainda persistir, escalar.
+    if detectar_limite_conexoes(page):
+        fechar_modal_limite_conexoes(page)
+        time.sleep(1)
+        if detectar_limite_conexoes(page):
+            log.bind(etapa="recuperacao", tecnico=code_anterior).error(
+                "Modal de limite de conexões reapareceu após Fechar — sessão irrecuperável"
+            )
+            raise SessaoEsgotadaError(
+                "Limite de conexões do Protheus excedido (modal persistente)"
+            )
+        try:
+            fazer_login(page)
+            navegar_ate_rotina(page)
+            return True
+        except CredenciaisInvalidasError:
+            raise SessaoEsgotadaError(
+                "Re-login após limite de conexões foi rejeitado pelo Protheus"
+            )
+        except NavegacaoError as e:
+            log.bind(etapa="recuperacao", tecnico=code_anterior).error(
+                f"Re-navegação após limite de conexões falhou: {e}"
+            )
+            raise SessaoEsgotadaError(
+                "Não foi possível re-navegar após fechar modal de limite de conexões"
+            )
 
     # 2. Pode haver modal/diálogo residual de uma falha — Esc para tentar fechar.
     log.bind(etapa="recuperacao", tecnico=code_anterior).info(
@@ -203,6 +234,22 @@ def processar_lista(
             pulados += 1
             continue
 
+        # Sprint 8.1: Verificação proativa do modal de limite de conexões
+        # antes de cada técnico — se aparecer no meio do download, o loop
+        # detecta na próxima iteração e aborta sem marcar dezenas de
+        # técnicos como falha silenciosa.
+        if detectar_limite_conexoes(page):
+            fechar_modal_limite_conexoes(page)
+            time.sleep(1)
+            if detectar_limite_conexoes(page):
+                log.bind(etapa="sessao", tecnico=t.code).error(
+                    "Limite de conexões do Protheus excedido — abortando execução."
+                )
+                _imprimir_resumo(total, sucesso, falha, pulados, time.monotonic() - inicio)
+                raise SessaoEsgotadaError(
+                    "Limite de conexões do Protheus excedido"
+                )
+
         # Sprint 6: Verificação de sessão antes de processar técnico
         if detectar_logout(page):
             relogins += 1
@@ -258,7 +305,21 @@ def processar_lista(
         # campo 11 a partir da tela errada e falha por consequência (não
         # mérito próprio). Se não conseguir recuperar, abortamos o restante.
         if idx < total:
-            if not _preparar_para_proximo(page, t.code):
+            try:
+                pronto = _preparar_para_proximo(page, t.code)
+            except SessaoEsgotadaError:
+                # Restantes ficam como "pendentes" no checkpoint, não como
+                # falha — assim o próximo run (após admin liberar sessões)
+                # retoma sem precisar de --retry-falhos.
+                nao_tentados = total - idx
+                log.bind(etapa="processar_lista").error(
+                    f"Abortando loop — limite de conexões excedido. "
+                    f"{nao_tentados} técnico(s) não tentado(s) permanecem pendentes."
+                )
+                _imprimir_resumo(total, sucesso, falha, pulados, time.monotonic() - inicio)
+                raise
+
+            if not pronto:
                 log.bind(etapa="processar_lista").error(
                     "Abortando loop — tela não recuperável para o próximo técnico"
                 )
