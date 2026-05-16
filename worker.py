@@ -39,6 +39,7 @@ Variáveis de ambiente:
     ROBOT_SCHEDULE_HOUR      default: 6
     ROBOT_SCHEDULE_MINUTE    default: 0
     ROBOT_RUN_ON_START       default: false
+    ROBOT_INCLUDE_DISMISSED  default: false  (true = passa --incluir-desligados em modo scheduled/full)
     WORKER_POLL_INTERVAL     default: 5  (segundos do loop signal)
 """
 
@@ -58,6 +59,7 @@ DATA_PIPELINE_DIR = Path(os.environ.get("DATA_PIPELINE_DIR", "/app/data_pipeline
 SCHEDULE_HOUR = int(os.environ.get("ROBOT_SCHEDULE_HOUR", "6"))
 SCHEDULE_MINUTE = int(os.environ.get("ROBOT_SCHEDULE_MINUTE", "0"))
 RUN_ON_START = os.environ.get("ROBOT_RUN_ON_START", "false").lower() in ("1", "true", "yes")
+INCLUDE_DISMISSED = os.environ.get("ROBOT_INCLUDE_DISMISSED", "false").lower() in ("1", "true", "yes")
 POLL_INTERVAL_S = int(os.environ.get("WORKER_POLL_INTERVAL", "5"))
 
 SIGNAL_FILE = DATA_PIPELINE_DIR / "run.signal"
@@ -200,6 +202,10 @@ def _executar_robo(mode: str) -> tuple[bool, str, int | None]:
     argv: list[str] = []
     if mode == "retry-falhos":
         argv = ["--retry-falhos"]
+    else:
+        # Modo full/scheduled: opcionalmente incluir técnicos desligados
+        if INCLUDE_DISMISSED:
+            argv = ["--incluir-desligados"]
 
     sink_id = logger.add(
         LOG_FILE,
@@ -242,7 +248,12 @@ def _executar_robo(mode: str) -> tuple[bool, str, int | None]:
         logger.bind(etapa="worker").error(traceback.format_exc())
 
     logger.bind(etapa="worker").info(f"== Fim (success={success}, exit_code={exit_code}) ==")
-    logger.remove(sink_id)
+    # Sink pode ter sido removido por main.py (loguru.remove() sem id apaga todos).
+    # Ignorar erro de "no existing handler" pra não travar o fluxo final.
+    try:
+        logger.remove(sink_id)
+    except ValueError:
+        pass
     return success, message, exit_code
 
 
@@ -291,7 +302,8 @@ def loop_forever() -> None:
     logger.info(
         f"Worker iniciado. pipeline_dir={DATA_PIPELINE_DIR} "
         f"scheduled={SCHEDULE_HOUR:02d}:{SCHEDULE_MINUTE:02d} "
-        f"run_on_start={RUN_ON_START} poll={POLL_INTERVAL_S}s"
+        f"run_on_start={RUN_ON_START} include_dismissed={INCLUDE_DISMISSED} "
+        f"poll={POLL_INTERVAL_S}s"
     )
 
     if RUN_ON_START:
