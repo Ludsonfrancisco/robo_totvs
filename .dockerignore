@@ -1,0 +1,47 @@
+# Ambiente local
+venv/
+.venv/
+.browser-profile/
+.env
+
+# Saída de execuções locais (volume cuida disso em prod)
+downloads/
+logs/
+state/
+
+# Caches Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Caches de teste
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+
+# Sistema
+.DS_Store
+Thumbs.db
+
+# Docs/agentes (não precisa em runtime)
+agentes/
+GEMINI.md
+CLAUDE.md
+DOCS.md
+PRD.md
+TASKS.md
+README.md
+install.sh
+
+# Evidence/temp
+evidence_tmp.png
+*.tmp

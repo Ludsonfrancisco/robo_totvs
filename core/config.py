@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -27,6 +28,12 @@ class Settings(BaseSettings):
     BROWSER_CHANNEL: str = "chrome"
     BROWSER_USER_DATA_DIR: str = ".browser-profile/protheus"
 
+    # Diretório base onde o robô grava os XLSX baixados. Estrutura final
+    # é `<DOWNLOAD_DIR>/<YYYY-MM-DD>/<COD>.xlsx`. Em produção (container)
+    # aponta pro volume compartilhado: /app/data_pipeline/entrada.
+    # Se vazio, mantém comportamento legado (dev local).
+    DOWNLOAD_DIR: Optional[str] = None
+
     @property
     def tecnicos_path(self) -> Path:
         p = Path(self.TECNICOS_JSON)
@@ -39,6 +46,8 @@ class Settings(BaseSettings):
 
     @property
     def downloads_dir(self) -> Path:
+        if self.DOWNLOAD_DIR:
+            return Path(self.DOWNLOAD_DIR)
         return Path.home() / "Documentos" / "projects" / "data_pipeline" / "robo_totvs" / "entrada"
 
     @property
