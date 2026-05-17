@@ -517,6 +517,99 @@ def fazer_login(page: Page) -> None:
 class NavegacaoError(Exception):
     """Falha transiente na navegação até a rotina."""
 
+
+def fechar_popup_moedas(page: Page, timeout_s: float = 2.0) -> bool:
+    """Detecta e cancela o popup 'Moedas' (DOLAR/UFIR/Euro/IENE/Taxa Juros).
+
+    Pode aparecer em vários pontos do fluxo (após a rotina abrir, durante o
+    preenchimento de produto na trans. múltipla, etc.). Identifica pela
+    combinação de marcadores distintivos (texto "Moedas" + campos de moedas)
+    e fallback por matching da imagem 10.2. `timeout_s=0` faz um único probe
+    sem polling.
+    """
+    import time as _time
+
+    marcadores_moedas = [
+        'text="Moedas"',
+        'text="DOLAR"',
+        'text="UFIR"',
+        'text="IENE"',
+        'text=/Taxa de Juros/i',
+        'label:has-text("DOLAR")',
+        'label:has-text("UFIR")',
+    ]
+    seletores_cancelar = [
+        'button:has-text("Cancelar"):not([disabled])',
+        'button:has-text("Cancelar")',
+        '[title="Cancelar"]',
+        'div[role="button"]:has-text("Cancelar")',
+    ]
+
+    deadline = _time.monotonic() + max(timeout_s, 0)
+    primeira_iter = True
+    while primeira_iter or _time.monotonic() < deadline:
+        primeira_iter = False
+
+        popup_visivel = False
+        for ctx in [page, *page.frames]:
+            for sel in marcadores_moedas:
+                try:
+                    if ctx.locator(sel).first.is_visible(timeout=200):
+                        popup_visivel = True
+                        break
+                except Exception:
+                    continue
+            if popup_visivel:
+                break
+
+        if popup_visivel:
+            for ctx in [page, *page.frames]:
+                for sel in seletores_cancelar:
+                    try:
+                        loc = ctx.locator(sel).first
+                        if loc.is_visible(timeout=200):
+                            loc.click()
+                            log.bind(etapa="moedas").info(
+                                f"Popup Moedas detectado — Cancelar clicado via DOM ({sel})"
+                            )
+                            _time.sleep(0.8)
+                            return True
+                    except Exception:
+                        continue
+            # Popup visível mas Cancelar não localizado via DOM — tenta matching
+            centro = aguardar_imagem(
+                page, "10.2_caso_apareca_moedas_cancelar.png",
+                timeout=1, threshold=0.45,
+            )
+            if centro is not None:
+                page.mouse.click(*centro)
+                log.bind(etapa="moedas").info(
+                    f"Popup Moedas — Cancelar clicado via matching em {centro}"
+                )
+                _time.sleep(0.8)
+                return True
+
+        if timeout_s <= 0:
+            break
+        _time.sleep(0.3)
+
+    # Última tentativa: matching com threshold baixo (a referência tem
+    # campos zerados e texto pré-digitado que reduz score).
+    centro = aguardar_imagem(
+        page, "10.2_caso_apareca_moedas_cancelar.png",
+        timeout=1, threshold=0.40,
+    )
+    if centro is not None:
+        page.mouse.click(*centro)
+        log.bind(etapa="moedas").info(
+            f"Popup Moedas — Cancelar clicado via matching de fallback em {centro}"
+        )
+        _time.sleep(0.8)
+        return True
+
+    return False
+
+
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=2, max=10),
@@ -707,60 +800,19 @@ def _executar_navegacao_rotina(page: Page, rotina: Literal["mat_estoque", "trans
     if not clicou_7d:
         log.bind(etapa="navegacao").debug("Popup 7 dias não apareceu — seguindo")
 
-    # Passo 10.2: Popup opcional "Moedas" (DOLAR/UFIR/Euro/IENE/Taxa Juros) — clicar em Cancelar
-    log.bind(etapa="navegacao").info("Verificando popup Moedas (10.2)...")
-    clicou_moedas_cancelar = False
-    seletores_moedas_cancelar = [
-        'button:has-text("Cancelar"):not([disabled])',
-        'button:has-text("Cancelar")',
-        '[title="Cancelar"]',
-        'div[role="button"]:has-text("Cancelar")',
-    ]
-    deadline_moedas = _time.monotonic() + 3
-    while _time.monotonic() < deadline_moedas and not clicou_moedas_cancelar:
-        # Confirma que o popup é o de Moedas antes de clicar Cancelar
-        # (para não clicar Cancelar em outras telas que tenham esse botão).
-        popup_moedas_visivel = False
-        for ctx in [page, *page.frames]:
-            try:
-                if ctx.locator('text="Moedas"').first.is_visible(timeout=200):
-                    popup_moedas_visivel = True
-                    break
-            except Exception:
-                continue
+    # Passo 10.2: Popup opcional "Moedas" — pode aparecer agora ou só após o passo 11
+    fechar_popup_moedas(page, timeout_s=3)
 
-        if popup_moedas_visivel:
-            for ctx in [page, *page.frames]:
-                for sel in seletores_moedas_cancelar:
-                    try:
-                        loc = ctx.locator(sel).first
-                        if loc.is_visible(timeout=200):
-                            loc.click()
-                            log.bind(etapa="navegacao").info(f"Cancelar do popup Moedas clicado via DOM ({sel})")
-                            clicou_moedas_cancelar = True
-                            break
-                    except Exception:
-                        continue
-                if clicou_moedas_cancelar:
-                    break
-            break  # popup detectado: não tem por que continuar o loop de espera
-        _time.sleep(0.4)
-
-    if not clicou_moedas_cancelar:
-        centro = aguardar_imagem(page, "10.2_caso_apareca_moedas_cancelar.png", timeout=2, threshold=0.65)
-        if centro is not None:
-            page.mouse.click(*centro)
-            log.bind(etapa="navegacao").info(f"Cancelar do popup Moedas clicado via matching em {centro}")
-            clicou_moedas_cancelar = True
-
-    if clicou_moedas_cancelar:
-        _time.sleep(1)
-    else:
-        log.bind(etapa="navegacao").debug("Popup Moedas não apareceu — seguindo")
-
-    # Passo 11: Validar que a tela de filtro de técnico carregou (campo código)
+    # Passo 11: Validar que a tela de filtro de técnico carregou (campo código).
+    # O popup Moedas pode aparecer tardiamente, durante essa espera — então
+    # alternamos entre "achou o campo?" e "popup Moedas surgiu?".
     log.bind(etapa="navegacao").info("Aguardando campo de código do técnico (11)...")
-    campo_codigo = aguardar_imagem(page, "11_colocar_o_codigo_tecnico.png", timeout=20, threshold=0.65)
+    campo_codigo = None
+    deadline_11 = _time.monotonic() + 20
+    while _time.monotonic() < deadline_11 and campo_codigo is None:
+        if fechar_popup_moedas(page, timeout_s=0):
+            _time.sleep(0.5)
+        campo_codigo = aguardar_imagem(page, "11_colocar_o_codigo_tecnico.png", timeout=2, threshold=0.65)
     if campo_codigo is None:
         # Tenta DOM
         encontrou_dom = False
