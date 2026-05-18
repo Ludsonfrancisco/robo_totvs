@@ -873,11 +873,21 @@ def _executar_download(page: Page, code: str, name: str) -> dict:
     
     log.bind(etapa="download", tecnico=code).info(f"Iniciando download para o técnico {code}...")
     
-    # Passo 11: Inserir código
+    # Passo 11: Inserir código no campo Armazém.
+    # O campo "Armazém?" vem pré-preenchido (último valor usado ou default do
+    # Protheus). `keyboard.type` concatena em vez de substituir e o Protheus
+    # trunca pelo max length — sem limpar, todos os técnicos saem com o
+    # MESMO código (o primeiro/default). Selecionar tudo + Delete antes.
     if not clicar_imagem(page, "11_colocar_o_codigo_tecnico.png", timeout=15, threshold=0.65):
         tirar_screenshot(page, etapa="falha_11_inserir_codigo", evidencia=True)
         raise DownloadError("Falha ao clicar no campo de código do técnico (11)")
-        
+
+    page.keyboard.down("Control")
+    page.keyboard.press("a")
+    page.keyboard.up("Control")
+    page.keyboard.press("Delete")
+    _time.sleep(0.3)
+
     page.keyboard.type(code, delay=30)
     _time.sleep(1) # Aguarda input registrar
     
