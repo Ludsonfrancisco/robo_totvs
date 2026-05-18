@@ -7,9 +7,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     DEBIAN_FRONTEND=noninteractive
 
-# Tesseract OCR — opcional (validação defensiva de nome do técnico)
+# Tesseract OCR (validação defensiva) + tzdata (timezone Brasil — sem isso
+# o container roda em UTC, scheduler 06:00 dispara às 03:00 BRT e o nome
+# da pasta de saída vira a data UTC, divergindo do horário Brasil).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-por \
+    && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-por tzdata \
+    && ln -sf /usr/share/zoneinfo/America/Sao_Paulo /etc/localtime \
+    && echo "America/Sao_Paulo" > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
