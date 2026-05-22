@@ -839,6 +839,33 @@ def _executar_navegacao_rotina(page: Page, rotina: Literal["mat_estoque", "trans
     else:
         log.bind(etapa="navegacao").debug("Popup Reforma Tributária não apareceu — seguindo")
 
+    # Passo 10.4: Verificar "Excedeu numero de licenças" apos fechar popups —
+    # o Protheus pode exibir esse modal quando fecha outro dialogo e a sessao
+    # ja esta no limite. Detectar aqui evita cair no Passo 11 com tela bloqueada.
+    for ctx in [page, *page.frames]:
+        try:
+            if ctx.locator('text="Excedeu numero de licenças"').first.is_visible(timeout=500):
+                log.bind(etapa="navegacao").warning("Popup 'Excedeu numero de licenças' detectado apos fechar popup — re-logando...")
+                for btn_sel in ['button:has-text("Fechar")', 'button:has-text("OK")']:
+                    try:
+                        btn = ctx.locator(btn_sel).first
+                        if btn.is_visible(timeout=300):
+                            btn.click()
+                            log.bind(etapa="navegacao").info(f"Clicou '{btn_sel}' no popup de licenças")
+                            break
+                    except Exception:
+                        continue
+                _time.sleep(120)
+                page.goto(settings.PROTHEUS_URL, wait_until="domcontentloaded", timeout=30000)
+                _time.sleep(3)
+                fazer_login(page)
+                _time.sleep(5)
+                raise NavegacaoError("Licenças excedidas apos popup — re-logado (retry automatico)")
+        except NavegacaoError:
+            raise
+        except Exception:
+            pass
+
     # Passo 11: Validar que a tela de filtro de técnico carregou (campo código)
     log.bind(etapa="navegacao").info("Aguardando campo de código do técnico (11)...")
     campo_codigo = aguardar_imagem(page, "11_colocar_o_codigo_tecnico.png", timeout=20, threshold=0.65)
