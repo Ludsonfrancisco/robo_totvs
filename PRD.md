@@ -2,7 +2,7 @@
 
 > **Documento de requisitos do produto (PRD)**
 > Fonte única de verdade. Toda decisão técnica, sprint ou prompt subsequente deve referenciar este arquivo.
-> **Versão:** 1.8 — 2026-05-10
+> **Versão:** 1.9 — 2026-05-22
 > **Autor:** Ludson Francisco
 > **Status:** Pronto para Produção (Sprints 1-8 Concluídas + hotfix 8.1 "Limite de Conexões") · F7 (Transferência Múltipla) em planejamento
 
@@ -19,10 +19,11 @@ O projeto evoluiu do MVP para uma arquitetura de pipeline de dados. Os downloads
 
 **Conquistas Técnicas Recentes:**
 1.  **Arquitetura de Pipeline**: Migração dos downloads da pasta interna para `~/Documents/projects/data_pipeline/robo_totvs/entrada/`.
-2.  **Unicidade com UUID**: Implementação de nomes de arquivo baseados em UUID v4, eliminando colisões e facilitando a ingestão por ferramentas de ETL.
+2.  **Nomenclatura UUID**: Cada download recebe nome `UUID_tecnico.xlsx` para evitar colisões.
 3.  **Organização Temporal**: Criação automática de subpastas por data de execução (`AAAA-MM-DD`) dentro do pipeline.
-4.  **Estabilização Visual**: Implementação de viewport fixa (1366x768) e multi-scale matching.
-5.  **Idempotência**: Sistema de checkpoint em JSON que permite retomar execuções.
+4.  **Consumidor downstream (dmais_portal)**: O portal D+ consome os `.xlsx` via volume Docker compartilhado. `consolidar_estoque.py` (no dmais_portal) usa fallback hierárquico: tenta `entrada/<HOJE>`, depois `entrada/<ONTEM>`, depois o mais recente disponível. A data do diretório encontrado é repassada para `import_stock` como `snapshot_date` (data local BRT, não UTC), garantindo que o card "Última Consolidação" do dashboard reflita a data real dos dados.
+5.  **Estabilização Visual**: Implementação de viewport fixa (1366x768) e multi-scale matching.
+6.  **Idempotência**: Sistema de checkpoint em JSON que permite retomar execuções.
 
 **Problema que resolve:**
 A operação atual é 100% manual: o operador faz login no Protheus, navega até Favoritos → "Mat Estoque Por Tecnico", insere o código de cada técnico, escolhe o formato XLSX, clica em "Imprimir" e baixa o arquivo. Para uma lista com N técnicos, são ~10 cliques por item × N + erros humanos + tempo ocioso esperando o sistema responder. O Protheus WebApp roda em SmartClient HTML com uso intensivo de Canvas, IDs ofuscados e iFrames — o que dificulta automações tradicionais baseadas em DOM.

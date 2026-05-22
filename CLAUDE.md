@@ -153,6 +153,8 @@ Validate after deploy: `docker exec <container> date` — must end in `-03 2026`
 | Chrome profile | `/app/.browser-profile/` | (named volume `robo_profile`, not on host fs) |
 | Logs & checkpoint | `/app/logs/`, `/app/state/` | (ephemeral — inside container, lost on rebuild) |
 
+**Nota sobre integração com dmais_portal:** O portal consome os `.xlsx` do volume `/app/data_pipeline/`. A partir de v1.7.0 do dmais_portal, a consolidação usa fallback hierárquico (hoje → ontem → mais recente) e propaga a data do diretório encontrado como `snapshot_date` (BRT local, não UTC). O robô não precisa mudar nada — a compatibilidade é total com a estrutura `entrada/<YYYY-MM-DD>/*.xlsx`.
+
 Important: `/app/state/checkpoint_<DATA>.json` is **not** in a volume. Rebuilds reset the day's checkpoint — fine for the morning scheduled run (no prior state), but a rebuild *mid-run* makes the next run re-process technicians already done.
 
 ### Sanity-test before full runs

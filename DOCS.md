@@ -68,6 +68,12 @@ Causa raiz: o servidor mantém um teto de sessões simultâneas por usuário. Co
 
 **Aberto para próxima sprint:** logout explícito ao final de toda execução (clique no menu do usuário → "Sair") para eliminar sessões fantasma na origem. Hoje o cleanup depende do timeout do servidor (~horas).
 
+### Sprint 9: Integração Timezone e Pipeline com dmais_portal (2026-05-22)
+*   **Correção de timezone no consumidor**: Identificado que `import_stock` (dmais_portal) usava `timezone.now().date()` (UTC) para `snapshot_date`, criando snapshots com data errada entre 00h–03h UTC (21h–00h BRT). Corrigido para `datetime.today().date()` (data local BRT).
+*   **Fallback de diretório no pipeline**: `consolidar_estoque.py` agora usa `_encontrar_diretorio_entrada()` — tenta hoje → ontem → mais recente disponível. Resolve problema quando robô falha ou ainda não rodou no dia.
+*   **Propagação de data dos dados**: A data do diretório encontrado (`data_date`) é repassada de `consolidar_estoque.py` → `executar_consolidacao` → `import_stock` → `StockSnapshot.snapshot_date`, garantindo que o dashboard mostre a data real dos dados consolidados.
+*   **Views timezone-safe**: `EstoqueIndexView` agora usa `timezone.localdate()` (Django TIME_ZONE) em vez de `date.today()` (SO) para cálculo do `consolidation_status`.
+
 ## 3. Principais Decisões Técnicas
 
 | Desafio | Solução Adotada | Por quê? |
@@ -91,4 +97,4 @@ O robô é capaz de:
 7.  Gerar evidências visuais (screenshots) de cada erro para depuração.
 
 ---
-*Documento atualizado em: 10 de Maio de 2026*
+*Documento atualizado em: 22 de Maio de 2026*
