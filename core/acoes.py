@@ -835,7 +835,34 @@ def _executar_navegacao_rotina(page: Page, rotina: Literal["mat_estoque", "trans
                 continue
 
     if clicou_reforma:
-        _time.sleep(2)
+        _time.sleep(3)
+        # Tentar forcar renderizacao do Angular
+        try:
+            page.evaluate("window.dispatchEvent(new Event('resize'))")
+        except Exception:
+            pass
+        _time.sleep(10)
+
+        home_visivel = False
+        for ctx in [page, *page.frames]:
+            try:
+                if ctx.locator('text="Favoritos"').first.is_visible(timeout=1000):
+                    home_visivel = True
+                    break
+            except Exception:
+                continue
+
+        if not home_visivel:
+            # Reset completo: about:blank -> URL -> login
+            log.bind(etapa="navegacao").warning("Tela azul — reset completo via about:blank")
+            page.goto("about:blank", wait_until="domcontentloaded", timeout=10000)
+            _time.sleep(3)
+            page.goto(settings.PROTHEUS_URL, wait_until="domcontentloaded", timeout=30000)
+            _time.sleep(20)
+            if detectar_logout(page):
+                fazer_login(page)
+                _time.sleep(15)
+            raise NavegacaoError("Re-login apos popup Reforma Tributaria — retry vai re-navegar")
     else:
         log.bind(etapa="navegacao").debug("Popup Reforma Tributária não apareceu — seguindo")
 
