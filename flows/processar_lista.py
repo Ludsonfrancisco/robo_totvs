@@ -61,13 +61,139 @@ def _imprimir_resumo(total: int, sucesso: int, falha: int, pulados: int, duracao
     logger.info("═" * 51)
 
 
+def _detectar_tela_erro_protheus(page: Page) -> bool:
+    """Detecta telas de erro genéricas do Protheus não mapeadas por modais específicos.
+
+    Heurísticas:
+    1. DOM: texto 'Help:', 'Erro', 'Atenção', 'Internal Server Error' visível.
+    2. URL contém '/error/' ou '/help/' (telas de erro do Protheus WebApp).
+    3. Página em branco/sem interatividade (nenhum botão/link visível).
+    """
+    # 1. Verificar marcadores de erro via DOM
+    marcadores_erro = [
+        'text=/Help.*HELP/i',
+        'text=/Internal Server Error/i',
+        'text=/Application Error/i',
+        'text=/HTTP [45]\\d\\d/i',
+    ]
+    for ctx in [page, *page.frames]:
+        for sel in marcadores_erro:
+            try:
+                if ctx.locator(sel).first.is_visible(timeout=300):
+                    log.bind(etapa="recuperacao").warning(
+                        f"Tela de erro detectada via DOM ({sel}) — URL: {ctx.url}"
+                    )
+                    return True
+            except Exception:
+                continue
+
+    # 2. Verificar URL de erro
+    for ctx in [page, *page.frames]:
+        try:
+            url = ctx.url or ""
+            if "/error" in url.lower() or "/help" in url.lower():
+                log.bind(etapa="recuperacao").warning(
+                    f"URL de erro detectada: {url}"
+                )
+                return True
+        except Exception:
+            continue
+
+    return False
+
+
+def _reset_navegador(page: Page) -> bool:
+    """Último recurso: resetar o estado do navegador para recuperar de tela
+    desconhecida. Tenta em ordem:
+
+    1. page.reload() — recarrega a página atual (preserva sessão se válida).
+    2. page.goto(PROTHEUS_URL) — navega para a URL base.
+
+    Após o reload/goto, aguarda 10s para o Protheus se estabilizar e verifica
+    se caiu na tela de login (sessão perdida) ou na home.
+
+    Retorna True se conseguiu chegar num estado conhecido (login ou home).
+    Retorna False se o próprio reload/goto falhou.
+    """
+    from core.config import settings
+
+    # Tentativa 1: reload suave
+    log.bind(etapa="recuperacao").info(
+        "Último recurso: tentando page.reload() para resetar estado"
+    )
+    try:
+        page.reload(wait_until="domcontentloaded", timeout=30000)
+        time.sleep(10)  # Protheus precisa de tempo para re-renderizar
+
+        # Verificar se caiu na tela de login (sessão perdida pelo reload)
+        if detectar_logout(page):
+            log.bind(etapa="recuperacao").info(
+                "Reload derrubou sessão — fazendo re-login"
+            )
+            fazer_login(page)
+            navegar_ate_rotina(page)
+            return True
+
+        # Verificar se está na home
+        if validar_esta_na_home(page):
+            log.bind(etapa="recuperacao").info(
+                "Reload levou à home — re-navegando até a rotina"
+            )
+            navegar_ate_rotina(page)
+            return True
+
+        # Verificar se já está na rotina (campo 11)
+        if aguardar_imagem(page, "11_colocar_o_codigo_tecnico.png", timeout=5, threshold=0.65) is not None:
+            log.bind(etapa="recuperacao").info(
+                "Reload levou direto à tela de filtro"
+            )
+            return True
+
+        log.bind(etapa="recuperacao").warning(
+            "Reload não levou a estado conhecido — tentando goto"
+        )
+    except Exception as e:
+        log.bind(etapa="recuperacao").warning(f"page.reload() falhou: {e}")
+
+    # Tentativa 2: goto direto
+    log.bind(etapa="recuperacao").info(
+        f"Último recurso: tentando page.goto({settings.PROTHEUS_URL})"
+    )
+    try:
+        page.goto(settings.PROTHEUS_URL, wait_until="domcontentloaded", timeout=30000)
+        time.sleep(5)
+
+        # Após goto, verificar estado
+        if detectar_logout(page):
+            log.bind(etapa="recuperacao").info("Goto levou à tela de login — re-logando")
+            fazer_login(page)
+            navegar_ate_rotina(page)
+            return True
+
+        if validar_esta_na_home(page):
+            log.bind(etapa="recuperacao").info("Goto levou à home — re-navegando")
+            navegar_ate_rotina(page)
+            return True
+
+        if aguardar_imagem(page, "11_colocar_o_codigo_tecnico.png", timeout=5, threshold=0.65) is not None:
+            log.bind(etapa="recuperacao").info("Goto levou direto à tela de filtro")
+            return True
+
+    except Exception as e:
+        log.bind(etapa="recuperacao").error(f"page.goto() falhou: {e}")
+
+    return False
+
+
 def _preparar_para_proximo(page: Page, code_anterior: str) -> bool:
     """Garante que a página está na tela de filtro (campo 11) pronta para o próximo técnico.
 
     Estados possíveis após terminar um técnico (sucesso ou falha):
     - Já na tela de filtro (caminho feliz pós-sucesso): segue.
     - Modal/erro residual aberto: Esc até cair em estado conhecido.
+    - Tela de erro genérica do Protheus (Help, Internal Server Error): reset.
     - Na home (Favoritos visível): re-navega via `navegar_ate_rotina`.
+    - Estado desconhecido irreversível: último recurso = reload/goto + re-login.
 
     Retorna True se a tela está pronta, False se não conseguiu recuperar
     (nesse caso o orquestrador deve abortar o restante do loop).
@@ -107,6 +233,24 @@ def _preparar_para_proximo(page: Page, code_anterior: str) -> bool:
                 "Não foi possível re-navegar após fechar modal de limite de conexões"
             )
 
+    # 1.6. Tela de erro genérica do Protheus não mapeada (Help, 500, etc.)
+    if _detectar_tela_erro_protheus(page):
+        log.bind(etapa="recuperacao", tecnico=code_anterior).warning(
+            "Tela de erro genérica do Protheus detectada — tentando reset via reload"
+        )
+        try:
+            if _reset_navegador(page):
+                log.bind(etapa="recuperacao", tecnico=code_anterior).info(
+                    "Recuperado com sucesso após tela de erro genérica"
+                )
+                return True
+        except (CredenciaisInvalidasError, NavegacaoError, SessaoEsgotadaError):
+            raise  # Re-escalar erros fatais
+        except Exception as e:
+            log.bind(etapa="recuperacao", tecnico=code_anterior).error(
+                f"Reset após erro genérico falhou: {e}"
+            )
+
     # 2. Pode haver modal/diálogo residual de uma falha — Esc para tentar fechar.
     log.bind(etapa="recuperacao", tecnico=code_anterior).info(
         "Tela da rotina não detectada — pressionando Esc para limpar estado residual"
@@ -118,8 +262,8 @@ def _preparar_para_proximo(page: Page, code_anterior: str) -> bool:
             pass
         time.sleep(1)
 
-    # Re-checar campo 11 após Esc.
-    if aguardar_imagem(page, "11_colocar_o_codigo_tecnico.png", timeout=3, threshold=0.65) is not None:
+    # Re-checar campo 11 após Esc — tempo maior (5s) para Protheus lento.
+    if aguardar_imagem(page, "11_colocar_o_codigo_tecnico.png", timeout=5, threshold=0.65) is not None:
         log.bind(etapa="recuperacao", tecnico=code_anterior).info("Recuperado para tela de filtro via Esc")
         return True
 
@@ -156,10 +300,40 @@ def _preparar_para_proximo(page: Page, code_anterior: str) -> bool:
             log.bind(etapa="recuperacao", tecnico=code_anterior).error(
                 f"Falha ao re-navegar da home: {e}"
             )
+            # Re-navegação da home falhou — tentar reset nuclear antes de desistir
+            log.bind(etapa="recuperacao", tecnico=code_anterior).warning(
+                "Re-navegação da home falhou — tentando reset nuclear (reload/goto)"
+            )
+            try:
+                if _reset_navegador(page):
+                    return True
+            except (CredenciaisInvalidasError, NavegacaoError, SessaoEsgotadaError):
+                raise
+            except Exception as e2:
+                log.bind(etapa="recuperacao", tecnico=code_anterior).error(
+                    f"Reset nuclear falhou: {e2}"
+                )
             return False
 
+    # 4. Estado desconhecido — último recurso antes de abortar.
+    log.bind(etapa="recuperacao", tecnico=code_anterior).warning(
+        "Estado desconhecido (não campo 11, não home, não modal) — tentando reset nuclear"
+    )
+    try:
+        if _reset_navegador(page):
+            log.bind(etapa="recuperacao", tecnico=code_anterior).info(
+                "Recuperado via reset nuclear (reload/goto)"
+            )
+            return True
+    except (CredenciaisInvalidasError, NavegacaoError, SessaoEsgotadaError):
+        raise  # Erros fatais sobem para o orquestrador
+    except Exception as e:
+        log.bind(etapa="recuperacao", tecnico=code_anterior).error(
+            f"Reset nuclear falhou: {e}"
+        )
+
     log.bind(etapa="recuperacao", tecnico=code_anterior).error(
-        "Estado desconhecido — não foi possível recuperar para o próximo técnico"
+        "Estado desconhecido IRREVERSÍVEL — não foi possível recuperar para o próximo técnico"
     )
     return False
 

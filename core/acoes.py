@@ -1080,10 +1080,12 @@ def _executar_download(page: Page, code: str, name: str) -> dict:
     with open(arquivo_path, "rb") as f:
         file_hash = hashlib.sha256(f.read()).hexdigest()
         
-    # Passo 18: Retorno automático à home
+    # Passo 18: Retorno automático à home/rotina após download.
+    # O Protheus pode demorar para fechar a tela de relatório e voltar
+    # ao filtro — especialmente sob carga ou após múltiplos downloads.
     log.bind(etapa="download", tecnico=code).info("Aguardando retorno automático à rotina (18)...")
-    _time.sleep(7)
-    
+    _time.sleep(10)  # +3s em relação ao anterior (era 7s) para Protheus sob carga
+
     # Verifica se já retornou (checando tela de filtro 11 ou botões do Protheus)
     # Se o menu esquerdo (favoritos) está visível, é provável que retornou ou fechou a tela de relatório
     retornou = False
@@ -1091,12 +1093,25 @@ def _executar_download(page: Page, code: str, name: str) -> dict:
         retornou = True
     else:
         retornou = aguardar_imagem(page, "11_colocar_o_codigo_tecnico.png", timeout=5, threshold=0.65) is not None
-        
+
     if not retornou:
-        log.bind(etapa="download", tecnico=code).warning("Não retornou à home em 15s. Forçando Esc.")
-        page.keyboard.press("Escape")
-        _time.sleep(2)
-        page.keyboard.press("Escape")
+        log.bind(etapa="download", tecnico=code).warning(
+            "Não retornou à rotina em 15s. Pressionando Esc para fechar tela residual..."
+        )
+        for _ in range(4):  # +2 Esc em relação ao anterior (era 2)
+            page.keyboard.press("Escape")
+            _time.sleep(1)
+
+        # Verificar se Esc resolveu — não assumir que sim
+        retornou = aguardar_imagem(page, "11_colocar_o_codigo_tecnico.png", timeout=5, threshold=0.65) is not None
+        if not retornou:
+            # Screenshot para debug — ajuda a identificar telas não mapeadas
+            from core.navegador import tirar_screenshot
+            tirar_screenshot(page, etapa=f"pos_download_estado_desconhecido_{code}", evidencia=True)
+            log.bind(etapa="download", tecnico=code).warning(
+                "Após Esc, tela ainda não é campo 11. "
+                "O orquestrador (_preparar_para_proximo) tentará recuperação avançada."
+            )
         
     return {
         "status": "sucesso",
