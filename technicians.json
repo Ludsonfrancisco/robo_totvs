@@ -190,10 +190,17 @@
     },
     {
         "code": "GX",
-        "name": "MADSON",
+        "name": "WANDERSON COSTA ALVARENGA - DMAIS (VAREJO)",
         "login": "WANDERSON COSTA ALVARENGA - DMAIS (VAREJO)",
-        "status": "Ativo",
+        "status": "Desligado",
         "email": "wanderson.alvarenga@dmais.com.br"
+    },
+    {
+        "code": "JA",
+        "name": "MADSON COSTA NASCIMENTO - DMAIS (VAREJO)",
+        "login": "MADSON COSTA NASCIMENTO - DMAIS (VAREJO)",
+        "status": "Ativo",
+        "email": "madson.nascimento@dmais.com.br"
     },
     {
         "code": "Q6",
