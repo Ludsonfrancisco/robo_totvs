@@ -528,6 +528,32 @@ def _executar_navegacao_rotina(page: Page, rotina: Literal["mat_estoque", "trans
     
     nome_rotina_log = "Mat Estoque Por Tecnico" if rotina == "mat_estoque" else "Tranf. Multipla"
     
+    # Verifica se popup "Excedeu numero de licenças" apareceu (bloqueia tudo)
+    for ctx in [page, *page.frames]:
+        try:
+            if ctx.locator('text="Excedeu numero de licenças"').first.is_visible(timeout=500):
+                log.bind(etapa="navegacao").warning("Popup 'Excedeu numero de licenças' detectado! Fechando e aguardando...")
+                # Fecha clicando em "Fechar"
+                for btn_sel in ['button:has-text("Fechar")', 'button:has-text("OK")']:
+                    try:
+                        btn = ctx.locator(btn_sel).first
+                        if btn.is_visible(timeout=300):
+                            btn.click()
+                            log.bind(etapa="navegacao").info(f"Clicou '{btn_sel}' no popup de licenças")
+                            break
+                    except Exception:
+                        continue
+                # Espera 2 min para liberar licença
+                _time.sleep(120)
+                # Recarrega a página para tentar re-logar
+                page.reload(wait_until="domcontentloaded", timeout=30000)
+                _time.sleep(5)
+                raise NavegacaoError("Licenças excedidas — recarregando e aguardando (retry automático)")
+        except NavegacaoError:
+            raise
+        except Exception:
+            pass
+    
     # Heurística: Checa se o relatório já está visível (menu já pode estar aberto)
     log.bind(etapa="navegacao").info(f"Verificando se {nome_rotina_log} já está visível...")
     ja_visivel = False
