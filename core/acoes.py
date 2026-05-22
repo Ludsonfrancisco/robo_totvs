@@ -545,10 +545,13 @@ def _executar_navegacao_rotina(page: Page, rotina: Literal["mat_estoque", "trans
                         continue
                 # Espera 2 min para liberar licença
                 _time.sleep(120)
-                # Recarrega a página para tentar re-logar
-                page.reload(wait_until="domcontentloaded", timeout=30000)
+                # Vai direto para URL + re-login completo (reload nao funciona bem com sessao perdida)
+                log.bind(etapa="navegacao").info("Recarregando pagina completa e re-fazendo login...")
+                page.goto(settings.PROTHEUS_URL, wait_until="domcontentloaded", timeout=30000)
+                _time.sleep(3)
+                fazer_login(page)
                 _time.sleep(5)
-                raise NavegacaoError("Licenças excedidas — recarregando e aguardando (retry automático)")
+                raise NavegacaoError("Licenças excedidas — re-logado via goto + fazer_login (retry automatico)")
         except NavegacaoError:
             raise
         except Exception:
