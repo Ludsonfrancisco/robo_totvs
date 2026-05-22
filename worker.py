@@ -40,6 +40,8 @@ Variáveis de ambiente:
     ROBOT_SCHEDULE_MINUTE    default: 0
     ROBOT_RUN_ON_START       default: false
     ROBOT_INCLUDE_DISMISSED  default: false  (true = passa --incluir-desligados em modo scheduled/full)
+    ROBOT_AUTO_RETRY         default: true   (true = re-tenta 1x apos falha total com 0 sucessos)
+    ROBOT_RETRY_DELAY        default: 300    (segundos de espera antes do retry; default 5 min)
     WORKER_POLL_INTERVAL     default: 5  (segundos do loop signal)
 """
 
@@ -60,6 +62,8 @@ SCHEDULE_HOUR = int(os.environ.get("ROBOT_SCHEDULE_HOUR", "6"))
 SCHEDULE_MINUTE = int(os.environ.get("ROBOT_SCHEDULE_MINUTE", "0"))
 RUN_ON_START = os.environ.get("ROBOT_RUN_ON_START", "false").lower() in ("1", "true", "yes")
 INCLUDE_DISMISSED = os.environ.get("ROBOT_INCLUDE_DISMISSED", "false").lower() in ("1", "true", "yes")
+AUTO_RETRY = os.environ.get("ROBOT_AUTO_RETRY", "true").lower() in ("1", "true", "yes")
+RETRY_DELAY_S = int(os.environ.get("ROBOT_RETRY_DELAY", "300"))
 POLL_INTERVAL_S = int(os.environ.get("WORKER_POLL_INTERVAL", "5"))
 
 SIGNAL_FILE = DATA_PIPELINE_DIR / "run.signal"
@@ -294,6 +298,37 @@ def _sleep_until_or_signal(target: datetime) -> str | None:
         time.sleep(chunk)
 
 
+def _run_with_auto_retry(mode: str) -> None:
+    """Executa _run_once e, se houver falha total (0 sucessos), re-tenta 1x."""
+    _run_once(mode=mode)
+
+    if not AUTO_RETRY:
+        return
+
+    # Falha total = signal.ready nao foi criado
+    if READY_FILE.exists():
+        return  # Houve pelo menos 1 sucesso
+
+    if mode == "retry-falhos":
+        return  # Nao faz retry de um retry
+
+    logger.warning(
+        f"Falha total detectada (0 sucessos). Auto-retry habilitado — "
+        f"re-tentando em {RETRY_DELAY_S}s ({RETRY_DELAY_S//60} min)..."
+    )
+    time.sleep(RETRY_DELAY_S)
+
+    # Limpa artifacts antes do retry
+    _cleanup_run_artifacts()
+    _run_once(mode=mode)
+
+    if not READY_FILE.exists():
+        logger.error(
+            f"Auto-retry tambem falhou (0 sucessos). "
+            f"Proxima tentativa somente no horario agendado de amanha."
+        )
+
+
 def loop_forever() -> None:
     _ensure_dirs()
     logger.remove()
@@ -309,7 +344,7 @@ def loop_forever() -> None:
     if RUN_ON_START:
         logger.info("ROBOT_RUN_ON_START=true → executando imediatamente.")
         try:
-            _run_once(mode="scheduled")
+            _run_with_auto_retry(mode="scheduled")
         except Exception as exc:
             logger.error(f"Erro no run_on_start: {exc}")
             logger.error(traceback.format_exc())
@@ -324,10 +359,10 @@ def loop_forever() -> None:
                 payload = _consume_signal() or {}
                 mode = payload.get("mode", "full")
                 logger.info(f"Signal detectado. Payload={payload} mode={mode}")
-                _run_once(mode=mode)
+                _run_with_auto_retry(mode=mode)
             else:
                 logger.info("Horário-alvo atingido. Disparando robô (mode=scheduled).")
-                _run_once(mode="scheduled")
+                _run_with_auto_retry(mode="scheduled")
         except KeyboardInterrupt:
             logger.info("KeyboardInterrupt recebido. Encerrando.")
             break

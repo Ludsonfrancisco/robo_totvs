@@ -758,6 +758,58 @@ def _executar_navegacao_rotina(page: Page, rotina: Literal["mat_estoque", "trans
     else:
         log.bind(etapa="navegacao").debug("Popup Moedas não apareceu — seguindo")
 
+    # Passo 10.3: Popup opcional "Reforma Tributária" (TOTVS adicionou em 2026-05)
+    # Modal bloqueante com título "Atenção - Reforma Tributária" e botões
+    # "Não exibir nos próximos 7 dias" / "Fechar".
+    log.bind(etapa="navegacao").info("Verificando popup Reforma Tributária (10.3)...")
+    clicou_reforma = False
+    seletores_reforma = [
+        'text="Reforma Tributária"',
+        'text="Atenção - Reforma Tributária"',
+    ]
+    for ctx in [page, *page.frames]:
+        for sel in seletores_reforma:
+            try:
+                if ctx.locator(sel).first.is_visible(timeout=500):
+                    log.bind(etapa="navegacao").info("Popup Reforma Tributária detectado via DOM")
+                    # Tenta "Fechar" primeiro, depois "Não exibir nos próximos 7 dias"
+                    for btn_text in ["Fechar", "Não exibir nos próximos 7 dias"]:
+                        for ctx2 in [page, *page.frames]:
+                            try:
+                                btn = ctx2.locator(f'button:has-text("{btn_text}")').first
+                                if btn.is_visible(timeout=300):
+                                    btn.click()
+                                    log.bind(etapa="navegacao").info(f"Clicou '{btn_text}' no popup Reforma Tributária via DOM")
+                                    clicou_reforma = True
+                                    break
+                            except Exception:
+                                continue
+                        if clicou_reforma:
+                            break
+                    break
+            except Exception:
+                continue
+        if clicou_reforma:
+            break
+
+    if not clicou_reforma:
+        # Fallback: procurar qualquer modal com botão "Fechar" que esteja bloqueando
+        for ctx in [page, *page.frames]:
+            try:
+                btn_fechar = ctx.locator('button:has-text("Fechar"):not([disabled])').first
+                if btn_fechar.is_visible(timeout=300):
+                    btn_fechar.click()
+                    log.bind(etapa="navegacao").info("Botão 'Fechar' genérico clicado (fallback modal bloqueante)")
+                    clicou_reforma = True
+                    break
+            except Exception:
+                continue
+
+    if clicou_reforma:
+        _time.sleep(2)
+    else:
+        log.bind(etapa="navegacao").debug("Popup Reforma Tributária não apareceu — seguindo")
+
     # Passo 11: Validar que a tela de filtro de técnico carregou (campo código)
     log.bind(etapa="navegacao").info("Aguardando campo de código do técnico (11)...")
     campo_codigo = aguardar_imagem(page, "11_colocar_o_codigo_tecnico.png", timeout=20, threshold=0.65)
