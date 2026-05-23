@@ -155,6 +155,14 @@ Validate after deploy: `docker exec <container> date` — must end in `-03 2026`
 
 **Nota sobre integração com dmais_portal:** O portal consome os `.xlsx` do volume `/app/data_pipeline/`. A partir de v1.7.0 do dmais_portal, a consolidação usa fallback hierárquico (hoje → ontem → mais recente) e propaga a data do diretório encontrado como `snapshot_date` (BRT local, não UTC). O robô não precisa mudar nada — a compatibilidade é total com a estrutura `entrada/<YYYY-MM-DD>/*.xlsx`.
 
+**CRÍTICO — XLSX duplicados:** O robô salva cada download com nome UUID (`*.xlsx`). Se o robô rodar mais de uma vez no mesmo dia (manual + retry + scheduled), os arquivos se acumulam no diretório `entrada/<DATA>/`. O portal consolida **todos** os `.xlsx` presentes — resultando em estoque duplicado/triplicado no snapshot. **Antes de consolidar**, verifique se não há duplicados:
+
+```bash
+ls /srv/dmais/data_pipeline/entrada/$(date +%Y-%m-%d)/ | wc -l  # deve ser ~34 (um por técnico)
+```
+
+Se > 40 arquivos: limpe duplicados antes de consolidar. Veja "Clean XLSX duplicados" no runbook abaixo.
+
 Important: `/app/state/checkpoint_<DATA>.json` is **not** in a volume. Rebuilds reset the day's checkpoint — fine for the morning scheduled run (no prior state), but a rebuild *mid-run* makes the next run re-process technicians already done.
 
 ### Sanity-test before full runs
@@ -183,3 +191,54 @@ Each file should show a different armazém after `Armazém?` (HK, HJ, 2S, etc.).
 - **2026-05-17**: commit `9a8cf63` added popup-Moedas handling but regressed Passo 11, making every technician download armazém F8. Fix was `git revert 9a8cf63` — runbook in dmais_portal CLAUDE.md covers banco/XLSX cleanup.
 - **2026-05-17 (same day)**: deploy *during* a running batch left an orphan Chrome SingletonLock. Resolution: `rm -f Singleton*` in new container.
 - **2026-05-17 (same day)**: forgot to set `tzdata` in image — `TZ` env had no effect; container kept UTC. Fixed in commit `802bfd4`.
+- **2026-05-22**: robo rodou 4x no mesmo dia (scheduled + manual + retries) → 87 XLSX no diretorio (34 tecnicos × 2-7 copias). Portal consolidou todos → estoque triplicado (3358 items duplicados). Fix: script Python para identificar armazem por `sharedStrings.xml`, manter só o mais recente por tecnico, deletar snapshot duplicado do DB, re-consolidar. See "Clean XLSX duplicados" abaixo.
+
+### Clean XLSX duplicados (runbook)
+
+Se o diretorio `entrada/<DATA>/` tem mais arquivos que tecnicos (~34), limpe antes de consolidar:
+
+```bash
+CONTAINER=$(docker ps --filter "name=robo_totvs" --format '{{.Names}}' | head -1)
+docker exec "$CONTAINER" python3 -c "
+import os, zipfile, re
+dir_path = '/app/data_pipeline/entrada/$(date +%Y-%m-%d)'
+files_by_armazem = {}
+for fname in os.listdir(dir_path):
+    if not fname.endswith('.xlsx'): continue
+    fpath = os.path.join(dir_path, fname)
+    mtime = os.path.getmtime(fpath)
+    try:
+        with zipfile.ZipFile(fpath) as zf:
+            if 'xl/sharedStrings.xml' in zf.namelist():
+                xml = zf.read('xl/sharedStrings.xml').decode('utf-8', errors='ignore')
+                texts = re.findall(r'<t[^>]*>([^<]+)', xml)
+                for i, t in enumerate(texts):
+                    if 'Armazem' in t or 'Armaz' in t or 'armaz' in t.lower():
+                        if i+1 < len(texts):
+                            arm = texts[i+1].strip()[:10]
+                            files_by_armazem.setdefault(arm, []).append((mtime, fname))
+                        break
+    except: pass
+deleted = 0
+for arm, files in files_by_armazem.items():
+    files.sort(key=lambda x: x[0], reverse=True)
+    for _, fname in files[1:]:
+        os.remove(os.path.join(dir_path, fname))
+        deleted += 1
+print(f'Removidos {deleted} duplicados. Restantes: {len(os.listdir(dir_path))}')
+"
+```
+
+Depois, no dmais_portal: deletar snapshot do dia + re-consolidar:
+```bash
+docker exec apps_dmais python manage.py shell -c "
+from estoque.models import StockSnapshot, StockItem, ConsolidationLog
+import datetime
+today = datetime.date.today()
+StockSnapshot.objects.filter(snapshot_date=today).delete()
+StockItem.objects.filter(snapshot__snapshot_date=today).delete()
+ConsolidationLog.objects.filter(created_at__gte=datetime.datetime.combine(today, datetime.time.min)).delete()
+print('Snapshots de hoje removidos')
+"
+docker exec apps_dmais python manage.py executar_consolidacao --force
+```
