@@ -251,6 +251,20 @@ def _executar_robo(mode: str) -> tuple[bool, str, int | None]:
         logger.bind(etapa="worker").error(message)
         logger.bind(etapa="worker").error(traceback.format_exc())
 
+    # Guard: main.py may have removed our shared sink via
+    # core/log.py's configurar_log() (logger.remove() without args).
+    # Re-add the shared sink so the "Fim" line and subsequent logs
+    # appear in the Portal D+ tail view.
+    if sink_id not in logger._core.handlers:
+        sink_id = logger.add(
+            LOG_FILE,
+            level="INFO",
+            encoding="utf-8",
+            format="{time:HH:mm:ss} | {level: <7} | {extra[etapa]:<14} | {message}",
+            enqueue=False,
+            filter=lambda r: r["extra"].setdefault("etapa", "-") or True,
+        )
+
     logger.bind(etapa="worker").info(f"== Fim (success={success}, exit_code={exit_code}) ==")
     # Sink pode ter sido removido por main.py (loguru.remove() sem id apaga todos).
     # Ignorar erro de "no existing handler" pra não travar o fluxo final.
