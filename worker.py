@@ -206,6 +206,8 @@ def _executar_robo(mode: str) -> tuple[bool, str, int | None]:
     argv: list[str] = []
     if mode == "retry-falhos":
         argv = ["--retry-falhos"]
+        if INCLUDE_DISMISSED:
+            argv.append("--incluir-desligados")
     else:
         # Modo full/scheduled: opcionalmente incluir técnicos desligados
         if INCLUDE_DISMISSED:
