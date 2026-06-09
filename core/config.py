@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     ROUTERBOX_USER: Optional[str] = None
     ROUTERBOX_PASS: Optional[str] = None
     ROUTERBOX_ACERTA_URL: str = "https://integra.acertasolucoes.net.br/routerbox/app_login/index.php"
-    ROUTERBOX_LOGA_URL: str = "https://integra.loga.net.br/routerbox/app_login/index.php"
+    ROUTERBOX_LOGA_URL: str = "https://integra.loga.net.br/routerbox/app_login/app_login.php"
     ROUTERBOX_FILTER_ACERTA: str = "..#### BACKLOG GERAL ACERTA ####"
     ROUTERBOX_FILTER_LOGA: str = "..#### BACKLOG GERAL LOGA ####"
     ROUTERBOX_OUTPUT_DIR: str = "/app/data_pipeline/routerbox_backlog"
