@@ -66,10 +66,19 @@ AUTO_RETRY = os.environ.get("ROBOT_AUTO_RETRY", "true").lower() in ("1", "true",
 RETRY_DELAY_S = int(os.environ.get("ROBOT_RETRY_DELAY", "300"))
 POLL_INTERVAL_S = int(os.environ.get("WORKER_POLL_INTERVAL", "5"))
 
+# RouterBox Backlog hourly scheduler
+ROUTERBOX_ENABLED = os.environ.get("ROUTERBOX_HOURLY_ENABLED", "true").lower() in ("1", "true", "yes")
+ROUTERBOX_INTERVAL_MIN = int(os.environ.get("ROUTERBOX_INTERVAL_MINUTES", "60"))
+ROUTERBOX_ON_START = os.environ.get("ROUTERBOX_RUN_ON_START", "false").lower() in ("1", "true", "yes")
+
 SIGNAL_FILE = DATA_PIPELINE_DIR / "run.signal"
 LOG_FILE = DATA_PIPELINE_DIR / "run.log"
 DONE_FILE = DATA_PIPELINE_DIR / "run.done"
 READY_FILE = DATA_PIPELINE_DIR / "signal.ready"
+
+# RouterBox Backlog artifacts
+ROUTERBOX_DIR = Path(os.environ.get("ROUTERBOX_OUTPUT_DIR", "/app/data_pipeline/routerbox_backlog"))
+ROUTERBOX_DONE_FILE = ROUTERBOX_DIR / "run_routerbox.done"
 
 
 def _now_iso() -> str:
@@ -80,6 +89,7 @@ def _ensure_dirs() -> None:
     DATA_PIPELINE_DIR.mkdir(parents=True, exist_ok=True)
     (DATA_PIPELINE_DIR / "entrada").mkdir(parents=True, exist_ok=True)
     (DATA_PIPELINE_DIR / "processos").mkdir(parents=True, exist_ok=True)
+    ROUTERBOX_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _next_run_at(now: datetime | None = None) -> datetime:
@@ -345,6 +355,78 @@ def _run_with_auto_retry(mode: str) -> None:
         )
 
 
+def _run_routerbox_backlog() -> None:
+    """Executa o fluxo RouterBox Backlog e grava artifact de resultado."""
+    logger.info("[routerbox] Iniciando download + consolidação do backlog RouterBox.")
+    ROUTERBOX_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Cleanup do done anterior
+    if ROUTERBOX_DONE_FILE.exists():
+        try:
+            ROUTERBOX_DONE_FILE.unlink()
+        except OSError:
+            pass
+
+    started_at = _now_iso()
+    try:
+        from flows.routerbox_backlog import run_routerbox_backlog
+        exit_code = run_routerbox_backlog()
+    except SystemExit as exc:
+        exit_code = int(exc.code or 0)
+    except Exception as exc:
+        logger.error(f"[routerbox] Erro fatal: {exc}")
+        logger.error(traceback.format_exc())
+        exit_code = 2
+
+    success = exit_code == 0
+    message = {
+        0: "RouterBox backlog download + consolidação OK",
+        1: "RouterBox backlog: download parcial",
+        2: "RouterBox backlog: falha crítica",
+        3: "RouterBox backlog: erro de configuração",
+    }.get(exit_code, f"RouterBox backlog: exit code {exit_code}")
+
+    payload = {
+        "success": success,
+        "message": message,
+        "started_at": started_at,
+        "finished_at": _now_iso(),
+        "exit_code": exit_code,
+        "mode": "routerbox-backlog",
+    }
+
+    # Tentar enriquecer com dados do manifest consolidado
+    today = datetime.now().strftime("%Y-%m-%d")
+    manifest_path = ROUTERBOX_DIR / f"manifest-{today}.json"
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            payload.update({
+                "linhas_total": manifest.get("linhas_total"),
+                "linhas_acerta": manifest.get("linhas_acerta"),
+                "linhas_loga": manifest.get("linhas_loga"),
+                "ultima_data_ab": manifest.get("ultima_data_ab"),
+                "arquivo": manifest.get("arquivo"),
+            })
+        except (OSError, ValueError):
+            pass
+
+    try:
+        ROUTERBOX_DONE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as exc:
+        logger.error(f"[routerbox] Erro ao escrever {ROUTERBOX_DONE_FILE}: {exc}")
+
+    logger.info(f"[routerbox] Fim: success={success} exit_code={exit_code}")
+
+
+def _next_routerbox_run_at(now: datetime | None = None) -> datetime:
+    """Retorna o próximo horário de execução do RouterBox (alinhado à hora cheia)."""
+    now = now or datetime.now()
+    # Alinha ao minuto 0 de cada hora
+    candidate = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    return candidate
+
+
 def loop_forever() -> None:
     _ensure_dirs()
     logger.remove()
@@ -356,6 +438,11 @@ def loop_forever() -> None:
         f"run_on_start={RUN_ON_START} include_dismissed={INCLUDE_DISMISSED} "
         f"poll={POLL_INTERVAL_S}s"
     )
+    logger.info(
+        f"RouterBox backlog: enabled={ROUTERBOX_ENABLED} "
+        f"interval={ROUTERBOX_INTERVAL_MIN}min "
+        f"on_start={ROUTERBOX_ON_START} dir={ROUTERBOX_DIR}"
+    )
 
     if RUN_ON_START:
         logger.info("ROBOT_RUN_ON_START=true → executando imediatamente.")
@@ -365,20 +452,66 @@ def loop_forever() -> None:
             logger.error(f"Erro no run_on_start: {exc}")
             logger.error(traceback.format_exc())
 
+    if ROUTERBOX_ENABLED and ROUTERBOX_ON_START:
+        logger.info("ROUTERBOX_RUN_ON_START=true → executando RouterBox imediatamente.")
+        try:
+            _run_routerbox_backlog()
+        except Exception as exc:
+            logger.error(f"Erro no RouterBox run_on_start: {exc}")
+            logger.error(traceback.format_exc())
+
     while True:
         try:
-            next_run = _next_run_at()
-            logger.info(f"Aguardando próxima execução agendada: {next_run.isoformat(timespec='seconds')}")
-            trigger = _sleep_until_or_signal(next_run)
+            # Determinar qual scheduler dispara primeiro
+            next_protheus = _next_run_at()
+            events = [("protheus", next_protheus)]
 
-            if trigger == "signal":
-                payload = _consume_signal() or {}
-                mode = payload.get("mode", "full")
-                logger.info(f"Signal detectado. Payload={payload} mode={mode}")
-                _run_with_auto_retry(mode=mode)
+            if ROUTERBOX_ENABLED:
+                next_routerbox = _next_routerbox_run_at()
+                events.append(("routerbox", next_routerbox))
             else:
-                logger.info("Horário-alvo atingido. Disparando robô (mode=scheduled).")
-                _run_with_auto_retry(mode="scheduled")
+                next_routerbox = None
+
+            # Ordenar por horário
+            events.sort(key=lambda e: e[1])
+            next_name, next_time = events[0]
+
+            # Dormir até o próximo evento, mas checar signal a cada POLL_INTERVAL_S
+            remaining = (next_time - datetime.now()).total_seconds()
+            logger.info(
+                f"Próximo evento: {next_name} em {int(remaining)}s "
+                f"({next_time.strftime('%H:%M:%S')})"
+            )
+
+            while remaining > 0:
+                # Checar signal do Protheus
+                if SIGNAL_FILE.exists():
+                    payload = _consume_signal() or {}
+                    mode = payload.get("mode", "full")
+                    logger.info(f"Signal detectado. Payload={payload} mode={mode}")
+                    _run_with_auto_retry(mode=mode)
+                    break
+
+                # Checar se RouterBox deve disparar antes do Protheus
+                if ROUTERBOX_ENABLED:
+                    rb_remaining = (_next_routerbox_run_at() - datetime.now()).total_seconds()
+                    if rb_remaining <= 0:
+                        _run_routerbox_backlog()
+                        next_routerbox = _next_routerbox_run_at()
+                        break
+
+                chunk = min(remaining, float(POLL_INTERVAL_S))
+                time.sleep(chunk)
+                remaining = (next_time - datetime.now()).total_seconds()
+
+            # Executar o evento que venceu
+            if remaining <= 0:
+                if next_name == "protheus":
+                    logger.info("Horário-alvo atingido. Disparando robô Protheus (mode=scheduled).")
+                    _run_with_auto_retry(mode="scheduled")
+                elif next_name == "routerbox":
+                    _run_routerbox_backlog()
+
         except KeyboardInterrupt:
             logger.info("KeyboardInterrupt recebido. Encerrando.")
             break
