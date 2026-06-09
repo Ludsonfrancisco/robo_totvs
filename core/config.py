@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     ROUTERBOX_DOWNLOAD_TIMEOUT_S: int = 180
     ROUTERBOX_HOURLY_ENABLED: bool = True
     ROUTERBOX_INTERVAL_MINUTES: int = 30
+    ROUTERBOX_START_HOUR: int = 5
+    ROUTERBOX_START_MINUTE: int = 30
+    ROUTERBOX_END_HOUR: int = 22
+    ROUTERBOX_END_MINUTE: int = 0
     ROUTERBOX_RUN_ON_START: bool = False
 
     @property

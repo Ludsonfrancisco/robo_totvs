@@ -68,8 +68,10 @@ POLL_INTERVAL_S = int(os.environ.get("WORKER_POLL_INTERVAL", "5"))
 
 # RouterBox Backlog hourly scheduler
 ROUTERBOX_ENABLED = os.environ.get("ROUTERBOX_HOURLY_ENABLED", "true").lower() in ("1", "true", "yes")
-ROUTERBOX_INTERVAL_MIN = int(os.environ.get("ROUTERBOX_INTERVAL_MINUTES", "60"))
+ROUTERBOX_INTERVAL_MIN = int(os.environ.get("ROUTERBOX_INTERVAL_MINUTES", "30"))
 ROUTERBOX_ON_START = os.environ.get("ROUTERBOX_RUN_ON_START", "false").lower() in ("1", "true", "yes")
+ROUTERBOX_START_MINUTES = int(os.environ.get("ROUTERBOX_START_HOUR", "5")) * 60 + int(os.environ.get("ROUTERBOX_START_MINUTE", "30"))  # 330 = 5:30
+ROUTERBOX_END_MINUTES = int(os.environ.get("ROUTERBOX_END_HOUR", "22")) * 60 + int(os.environ.get("ROUTERBOX_END_MINUTE", "0"))     # 1320 = 22:00
 
 SIGNAL_FILE = DATA_PIPELINE_DIR / "run.signal"
 LOG_FILE = DATA_PIPELINE_DIR / "run.log"
@@ -420,17 +422,30 @@ def _run_routerbox_backlog() -> None:
 
 
 def _next_routerbox_run_at(now: datetime | None = None) -> datetime:
-    """Retorna o próximo horário de execução do RouterBox (alinhado ao intervalo)."""
+    """Retorna o próximo horário de execução do RouterBox (dentro da janela configurada)."""
     now = now or datetime.now()
     interval = ROUTERBOX_INTERVAL_MIN
-    # Calcula o próximo slot alinhado (ex: 00:00, 00:30, 01:00, 01:30, ...)
     minutes_today = now.hour * 60 + now.minute
+
+    # Se antes da janela, agendar para o início
+    if minutes_today < ROUTERBOX_START_MINUTES:
+        candidate = now.replace(hour=ROUTERBOX_START_MINUTES // 60, minute=ROUTERBOX_START_MINUTES % 60, second=0, microsecond=0)
+        return candidate
+
+    # Se depois da janela, agendar para o início do dia seguinte
+    if minutes_today >= ROUTERBOX_END_MINUTES:
+        candidate = (now + timedelta(days=1)).replace(hour=ROUTERBOX_START_MINUTES // 60, minute=ROUTERBOX_START_MINUTES % 60, second=0, microsecond=0)
+        return candidate
+
+    # Dentro da janela: próximo slot alinhado ao intervalo
     next_slot = ((minutes_today // interval) + 1) * interval
-    if next_slot >= 24 * 60:
-        # Passou da meia-noite, pula para o dia seguinte às 00:00
-        candidate = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    else:
-        candidate = now.replace(hour=next_slot // 60, minute=next_slot % 60, second=0, microsecond=0)
+
+    # Se o próximo slot cair no fim ou fora da janela, pula para o dia seguinte
+    if next_slot >= ROUTERBOX_END_MINUTES:
+        candidate = (now + timedelta(days=1)).replace(hour=ROUTERBOX_START_MINUTES // 60, minute=ROUTERBOX_START_MINUTES % 60, second=0, microsecond=0)
+        return candidate
+
+    candidate = now.replace(hour=next_slot // 60, minute=next_slot % 60, second=0, microsecond=0)
     return candidate
 
 
