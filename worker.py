@@ -420,10 +420,17 @@ def _run_routerbox_backlog() -> None:
 
 
 def _next_routerbox_run_at(now: datetime | None = None) -> datetime:
-    """Retorna o próximo horário de execução do RouterBox (alinhado à hora cheia)."""
+    """Retorna o próximo horário de execução do RouterBox (alinhado ao intervalo)."""
     now = now or datetime.now()
-    # Alinha ao minuto 0 de cada hora
-    candidate = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    interval = ROUTERBOX_INTERVAL_MIN
+    # Calcula o próximo slot alinhado (ex: 00:00, 00:30, 01:00, 01:30, ...)
+    minutes_today = now.hour * 60 + now.minute
+    next_slot = ((minutes_today // interval) + 1) * interval
+    if next_slot >= 24 * 60:
+        # Passou da meia-noite, pula para o dia seguinte às 00:00
+        candidate = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    else:
+        candidate = now.replace(hour=next_slot // 60, minute=next_slot % 60, second=0, microsecond=0)
     return candidate
 
 
