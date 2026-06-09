@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     ROUTERBOX_OUTPUT_DIR: str = "/app/data_pipeline/routerbox_backlog"
     ROUTERBOX_DOWNLOAD_TIMEOUT_S: int = 180
     ROUTERBOX_HOURLY_ENABLED: bool = True
-    ROUTERBOX_INTERVAL_MINUTES: int = 60
+    ROUTERBOX_INTERVAL_MINUTES: int = 30
     ROUTERBOX_RUN_ON_START: bool = False
 
     @property
