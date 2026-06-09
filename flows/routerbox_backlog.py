@@ -415,7 +415,14 @@ def run_routerbox_backlog(
                     downloaded[inst.name] = destino
                 except Exception as exc:
                     log.error(f"Erro ao baixar {inst.name}: {exc}")
-                    errors.append(f"{inst.name}: {exc}")
+                    # Fallback: usar o XLSX mais recente disponivel dessa instancia
+                    fallback = _find_latest(out, prefix=f"{inst.name.lower()}_backlog_", suffix=".xlsx")
+                    if fallback:
+                        log.warning(f"Usando XLSX anterior para {inst.name}: {fallback.name}")
+                        downloaded[inst.name] = fallback
+                    else:
+                        log.error(f"Sem fallback para {inst.name} — download falhou e nao ha arquivo anterior.")
+                        errors.append(f"{inst.name}: {exc} (sem fallback)")
                 finally:
                     context.close()
         finally:
@@ -456,9 +463,11 @@ def run_routerbox_backlog(
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
         log.info(f"Manifest salvo: {manifest_path}")
 
-        # Limpar downloads antigos (manter apenas hoje e dia anterior)
-        _cleanup_old_files(out, keep_days=2, prefix="BACKLOG-GERAL-CONSOLIDADO-")
-        _cleanup_old_files(out, keep_days=2, prefix="manifest-")
+        # Limpar arquivos antigos (manter apenas os ultimos 12h)
+        _cleanup_old_files(out, keep_hours=12, prefix="BACKLOG-GERAL-CONSOLIDADO-")
+        _cleanup_old_files(out, keep_hours=12, prefix="manifest-")
+        _cleanup_old_files(out, keep_hours=12, prefix="acerta_backlog_")
+        _cleanup_old_files(out, keep_hours=12, prefix="loga_backlog_")
 
         return 0
 
@@ -467,16 +476,26 @@ def run_routerbox_backlog(
         return 1
 
 
-def _cleanup_old_files(directory: Path, keep_days: int, prefix: str) -> None:
-    """Remove arquivos com o prefixo dado mais antigos que keep_days."""
+def _find_latest(directory: Path, prefix: str, suffix: str = ".xlsx") -> Path | None:
+    """Encontra o arquivo mais recente com o prefixo e sufixo dados."""
+    files = sorted(
+        (f for f in directory.glob(f"{prefix}*{suffix}") if f.is_file()),
+        key=lambda f: f.stat().st_mtime,
+        reverse=True,
+    )
+    return files[0] if files else None
+
+
+def _cleanup_old_files(directory: Path, keep_hours: int, prefix: str) -> None:
+    """Remove arquivos com o prefixo dado mais antigos que keep_hours."""
     import re as _re
     now = datetime.now()
     for f in directory.glob(f"{prefix}*"):
         if f.is_file():
-            age_days = (now - datetime.fromtimestamp(f.stat().st_mtime)).days
-            if age_days >= keep_days:
+            age_hours = (now - datetime.fromtimestamp(f.stat().st_mtime)).total_seconds() / 3600
+            if age_hours >= keep_hours:
                 try:
                     f.unlink()
                     log.info(f"Removido arquivo antigo: {f}")
                 except OSError as exc:
-                    log.warning(f"Não conseguiu remover {f}: {exc}")
+                    log.warning(f"Nao conseguiu remover {f}: {exc}")
