@@ -23,6 +23,7 @@ from core.log import log
 from core.navegador import iniciar_navegador
 from flows.processar_lista import processar_lista
 from flows.transferencia_multipla import executar_transferencia_multipla
+from flows.routerbox_backlog import run_routerbox_backlog
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -42,6 +43,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--planilha",
         type=Path,
         help="Caminho para a planilha XLSX. Se omitido, usa a configurada no .env",
+    )
+
+    cmd_routerbox = subparsers.add_parser("routerbox-backlog", help="Baixa e consolida backlogs RouterBox (ACERTA + LOGA)")
+    cmd_routerbox.add_argument(
+        "--only",
+        choices=["acerta", "loga"],
+        help="Baixar apenas uma instância",
+    )
+    cmd_routerbox.add_argument(
+        "--output-dir",
+        type=Path,
+        help="Diretório de saída (default: ROUTERBOX_OUTPUT_DIR do .env)",
+    )
+    cmd_routerbox.add_argument(
+        "--no-consolidate",
+        action="store_true",
+        help="Não consolidar os XLSX (apenas download)",
     )
 
     # Argumentos globais/antigos continuam no parser principal para fallback
@@ -81,6 +99,14 @@ def main(argv: list[str] | None = None) -> int:
 
     log.bind(etapa="main").info(f"alvo: {settings.PROTHEUS_URL}")
     log.bind(etapa="main").info(f"comando: {args.command or 'processar_lista'}")
+
+    # routerbox-backlog gerencia seu próprio navegador
+    if args.command == "routerbox-backlog":
+        return run_routerbox_backlog(
+            only=args.only,
+            output_dir=str(args.output_dir) if args.output_dir else None,
+            no_consolidate=args.no_consolidate,
+        )
 
     with iniciar_navegador() as (_, _, page):
         try:

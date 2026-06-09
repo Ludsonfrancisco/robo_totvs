@@ -34,6 +34,19 @@ class Settings(BaseSettings):
     # Se vazio, mantém comportamento legado (dev local).
     DOWNLOAD_DIR: Optional[str] = None
 
+    # RouterBox Backlog hourly automation
+    ROUTERBOX_USER: Optional[str] = None
+    ROUTERBOX_PASS: Optional[str] = None
+    ROUTERBOX_ACERTA_URL: str = "https://integra.acertasolucoes.net.br/routerbox/app_login/index.php"
+    ROUTERBOX_LOGA_URL: str = "https://integra.loga.net.br/routerbox/app_login/index.php"
+    ROUTERBOX_FILTER_ACERTA: str = "..#### BACKLOG GERAL ACERTA ####"
+    ROUTERBOX_FILTER_LOGA: str = "..#### BACKLOG GERAL LOGA ####"
+    ROUTERBOX_OUTPUT_DIR: str = "/app/data_pipeline/routerbox_backlog"
+    ROUTERBOX_DOWNLOAD_TIMEOUT_S: int = 180
+    ROUTERBOX_HOURLY_ENABLED: bool = True
+    ROUTERBOX_INTERVAL_MINUTES: int = 60
+    ROUTERBOX_RUN_ON_START: bool = False
+
     @property
     def tecnicos_path(self) -> Path:
         p = Path(self.TECNICOS_JSON)
