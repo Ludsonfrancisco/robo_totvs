@@ -362,7 +362,12 @@ def run_routerbox_backlog(
         log.error("ROUTERBOX_USER e ROUTERBOX_PASS são obrigatórios.")
         return 3
 
-    out = Path(output_dir) if output_dir else Path(settings.ROUTERBOX_OUTPUT_DIR)
+    base = Path(output_dir) if output_dir else Path(settings.ROUTERBOX_OUTPUT_DIR)
+    base.mkdir(parents=True, exist_ok=True)
+    now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+    hora = now.strftime("%H-%M")
+    out = base / today / hora
     out.mkdir(parents=True, exist_ok=True)
 
     instances: list[RouterBoxInstance] = []
@@ -383,7 +388,6 @@ def run_routerbox_backlog(
         log.error("Nenhuma instância RouterBox para processar (only=%s)", only)
         return 3
 
-    today = datetime.now().strftime("%Y-%m-%d")
     downloaded: dict[str, Path] = {}
     fresh_downloads: set[str] = set()
     fallback_downloads: dict[str, str] = {}
@@ -419,7 +423,7 @@ def run_routerbox_backlog(
                 except Exception as exc:
                     log.error(f"Erro ao baixar {inst.name}: {exc}")
                     # Fallback: usar o XLSX mais recente disponivel dessa instancia
-                    fallback = _find_latest(out, prefix=f"{inst.name.lower()}_backlog_", suffix=".xlsx")
+                    fallback = _find_latest_recursive(base, prefix=f"{inst.name.lower()}_backlog_", suffix=".xlsx")
                     if fallback:
                         log.warning(f"Usando XLSX anterior para {inst.name}: {fallback.name}")
                         downloaded[inst.name] = fallback
@@ -445,7 +449,7 @@ def run_routerbox_backlog(
         log.warning(f"Download parcial: {list(downloaded.keys())}. Consolidação requer ACERTA + LOGA.")
         return 1
 
-    consolidado_path = out / f"BACKLOG-GERAL-CONSOLIDADO-{today}.xlsx"
+    consolidado_path = out / "BACKLOG-GERAL-CONSOLIDADO.xlsx"
     try:
         resumo = consolidar_backlogs(
             acerta_path=downloaded["ACERTA"],
@@ -474,15 +478,12 @@ def run_routerbox_backlog(
             "source_mtime_min": source_mtime_values[0] if source_mtime_values else None,
             "source_mtime_max": source_mtime_values[-1] if source_mtime_values else None,
         }
-        manifest_path = out / f"manifest-{today}.json"
+        manifest_path = out / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
         log.info(f"Manifest salvo: {manifest_path}")
 
-        # Limpar arquivos antigos (manter apenas os ultimos 12h)
-        _cleanup_old_files(out, keep_hours=12, prefix="BACKLOG-GERAL-CONSOLIDADO-")
-        _cleanup_old_files(out, keep_hours=12, prefix="manifest-")
-        _cleanup_old_files(out, keep_hours=12, prefix="acerta_backlog_")
-        _cleanup_old_files(out, keep_hours=12, prefix="loga_backlog_")
+        # Limpar diretórios antigos (manter 60 dias)
+        _cleanup_old_dirs(base, keep_days=60)
 
         if fallback_downloads:
             log.warning(f"RouterBox consolidado com fallback: {sorted(fallback_downloads)}")
@@ -494,26 +495,26 @@ def run_routerbox_backlog(
         return 1
 
 
-def _find_latest(directory: Path, prefix: str, suffix: str = ".xlsx") -> Path | None:
-    """Encontra o arquivo mais recente com o prefixo e sufixo dados."""
+def _find_latest_recursive(base: Path, prefix: str, suffix: str = ".xlsx") -> Path | None:
+    """Busca recursivamente nos subdiretórios <DATA>/<HORA>/ o arquivo mais recente."""
     files = sorted(
-        (f for f in directory.glob(f"{prefix}*{suffix}") if f.is_file()),
+        (f for f in base.rglob(f"{prefix}*{suffix}") if f.is_file()),
         key=lambda f: f.stat().st_mtime,
         reverse=True,
     )
     return files[0] if files else None
 
 
-def _cleanup_old_files(directory: Path, keep_hours: int, prefix: str) -> None:
-    """Remove arquivos com o prefixo dado mais antigos que keep_hours."""
-    import re as _re
+def _cleanup_old_dirs(base: Path, keep_days: int) -> None:
+    """Remove diretórios de data com mais de keep_days."""
+    import shutil
     now = datetime.now()
-    for f in directory.glob(f"{prefix}*"):
-        if f.is_file():
-            age_hours = (now - datetime.fromtimestamp(f.stat().st_mtime)).total_seconds() / 3600
-            if age_hours >= keep_hours:
+    for d in sorted(base.glob("????-??-??")):
+        if d.is_dir():
+            age_days = (now - datetime.fromtimestamp(d.stat().st_mtime)).total_seconds() / 86400
+            if age_days >= keep_days:
                 try:
-                    f.unlink()
-                    log.info(f"Removido arquivo antigo: {f}")
+                    shutil.rmtree(d)
+                    log.info(f"Removido diretório antigo: {d}")
                 except OSError as exc:
-                    log.warning(f"Nao conseguiu remover {f}: {exc}")
+                    log.warning(f"Nao conseguiu remover {d}: {exc}")
