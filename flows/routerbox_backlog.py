@@ -482,8 +482,8 @@ def run_routerbox_backlog(
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
         log.info(f"Manifest salvo: {manifest_path}")
 
-        # Limpar diretórios antigos (manter 60 dias)
-        _cleanup_old_dirs(base, keep_days=60)
+        # Limpar diretórios antigos (manter 61 dias)
+        _cleanup_old_dirs(base, keep_days=61)
 
         if fallback_downloads:
             log.warning(f"RouterBox consolidado com fallback: {sorted(fallback_downloads)}")
