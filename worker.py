@@ -409,6 +409,12 @@ def _run_routerbox_backlog() -> None:
                 "linhas_loga": manifest.get("linhas_loga"),
                 "ultima_data_ab": manifest.get("ultima_data_ab"),
                 "arquivo": manifest.get("arquivo"),
+                "fresh_downloads": manifest.get("fresh_downloads"),
+                "fallback_downloads": manifest.get("fallback_downloads"),
+                "used_fallback": manifest.get("used_fallback"),
+                "source_mtimes": manifest.get("source_mtimes"),
+                "source_mtime_min": manifest.get("source_mtime_min"),
+                "source_mtime_max": manifest.get("source_mtime_max"),
             })
         except (OSError, ValueError):
             pass

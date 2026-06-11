@@ -385,6 +385,8 @@ def run_routerbox_backlog(
 
     today = datetime.now().strftime("%Y-%m-%d")
     downloaded: dict[str, Path] = {}
+    fresh_downloads: set[str] = set()
+    fallback_downloads: dict[str, str] = {}
     errors: list[str] = []
 
     with sync_playwright() as p:
@@ -413,6 +415,7 @@ def run_routerbox_backlog(
                         timeout_s=settings.ROUTERBOX_DOWNLOAD_TIMEOUT_S,
                     )
                     downloaded[inst.name] = destino
+                    fresh_downloads.add(inst.name)
                 except Exception as exc:
                     log.error(f"Erro ao baixar {inst.name}: {exc}")
                     # Fallback: usar o XLSX mais recente disponivel dessa instancia
@@ -420,6 +423,7 @@ def run_routerbox_backlog(
                     if fallback:
                         log.warning(f"Usando XLSX anterior para {inst.name}: {fallback.name}")
                         downloaded[inst.name] = fallback
+                        fallback_downloads[inst.name] = str(exc)
                     else:
                         log.error(f"Sem fallback para {inst.name} — download falhou e nao ha arquivo anterior.")
                         errors.append(f"{inst.name}: {exc} (sem fallback)")
@@ -451,6 +455,11 @@ def run_routerbox_backlog(
         log.info(f"Consolidação OK: {resumo['linhas_total']} linhas → {consolidado_path}")
 
         # Manifest JSON para o portal consumir
+        source_mtimes = {
+            name.lower(): datetime.fromtimestamp(path.stat().st_mtime).isoformat()
+            for name, path in downloaded.items()
+        }
+        source_mtime_values = sorted(source_mtimes.values())
         manifest = {
             "gerado_em": resumo["gerado_em"],
             "arquivo": consolidado_path.name,
@@ -458,6 +467,12 @@ def run_routerbox_backlog(
             "linhas_acerta": resumo["linhas_acerta"],
             "linhas_loga": resumo["linhas_loga"],
             "ultima_data_ab": resumo["ultima_data_ab"],
+            "fresh_downloads": sorted(fresh_downloads),
+            "fallback_downloads": fallback_downloads,
+            "used_fallback": bool(fallback_downloads),
+            "source_mtimes": source_mtimes,
+            "source_mtime_min": source_mtime_values[0] if source_mtime_values else None,
+            "source_mtime_max": source_mtime_values[-1] if source_mtime_values else None,
         }
         manifest_path = out / f"manifest-{today}.json"
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -469,6 +484,9 @@ def run_routerbox_backlog(
         _cleanup_old_files(out, keep_hours=12, prefix="acerta_backlog_")
         _cleanup_old_files(out, keep_hours=12, prefix="loga_backlog_")
 
+        if fallback_downloads:
+            log.warning(f"RouterBox consolidado com fallback: {sorted(fallback_downloads)}")
+            return 1
         return 0
 
     except Exception as exc:
