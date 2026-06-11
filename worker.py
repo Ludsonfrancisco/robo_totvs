@@ -362,12 +362,7 @@ def _run_routerbox_backlog() -> None:
     logger.info("[routerbox] Iniciando download + consolidação do backlog RouterBox.")
     ROUTERBOX_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Cleanup do done anterior
-    if ROUTERBOX_DONE_FILE.exists():
-        try:
-            ROUTERBOX_DONE_FILE.unlink()
-        except OSError:
-            pass
+    # NÃO deletar done anterior — portal precisa dele durante a execução.
 
     started_at = _now_iso()
     try:
