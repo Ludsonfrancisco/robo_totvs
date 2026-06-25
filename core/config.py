@@ -39,8 +39,8 @@ class Settings(BaseSettings):
     ROUTERBOX_PASS: Optional[str] = None
     ROUTERBOX_ACERTA_URL: str = "https://integra.acertasolucoes.net.br/routerbox/app_login/index.php"
     ROUTERBOX_LOGA_URL: str = "https://integra.loga.net.br/routerbox/app_login/app_login.php"
-    ROUTERBOX_FILTER_ACERTA: str = "..#### BACKLOG GERAL ACERTA ####"
-    ROUTERBOX_FILTER_LOGA: str = "..#### BACKLOG GERAL LOGA ####"
+    ROUTERBOX_FILTER_ACERTA: str = "..>>>>>>>>>>>>>>>>>>>>>>. FIELD GERAL JAN DMAIS <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<"
+    ROUTERBOX_FILTER_LOGA: str = "..>>>>>>##BACKLOG OPERACIONAL VAREJO (CONS/ RES/ PME GERAL)<<<<<"
     ROUTERBOX_OUTPUT_DIR: str = "/app/data_pipeline/routerbox_backlog"
     ROUTERBOX_DOWNLOAD_TIMEOUT_S: int = 180
     ROUTERBOX_HOURLY_ENABLED: bool = True
