@@ -155,7 +155,22 @@ def _reset_navegador(page: Page) -> bool:
     except Exception as e:
         log.bind(etapa="recuperacao").warning(f"page.reload() falhou: {e}")
 
-    # Tentativa 2: goto direto
+    # Tentativa 2: limpar storage e goto direto
+    # O perfil persistente acumula cache, IndexedDB, localStorage, service workers
+    # que corrompem o estado do Protheus após múltiplos reloads.
+    log.bind(etapa="recuperacao").info(
+        "Limpando cache/storage do navegador antes do goto..."
+    )
+    try:
+        page.evaluate("""() => {
+            try { localStorage.clear(); } catch(e) {}
+            try { sessionStorage.clear(); } catch(e) {}
+        }""")
+        page.context.clear_cookies()
+        log.bind(etapa="recuperacao").info("Cache/storage limpos com sucesso")
+    except Exception as e:
+        log.bind(etapa="recuperacao").debug(f"Limpeza de storage falhou (não crítico): {e}")
+
     log.bind(etapa="recuperacao").info(
         f"Último recurso: tentando page.goto({settings.PROTHEUS_URL})"
     )
@@ -290,29 +305,39 @@ def _preparar_para_proximo(page: Page, code_anterior: str) -> bool:
             home_visivel = True
 
     if home_visivel:
+        # Primeiro: reset do navegador (reload/goto) — garante estado Angular limpo.
+        # Após múltiplos downloads o Protheus acumula estado residual (modais,
+        # cache, iframes zumbis). Tentar re-navegar desse estado corrompido é
+        # frágil (Passo 07: Favoritos existe no DOM mas não é clicável).
+        # Um reload limpo resolve na maioria dos casos.
         log.bind(etapa="recuperacao", tecnico=code_anterior).info(
-            "Detectada home ou estado inicial — re-navegando até a rotina"
+            "Detectada home — resetando navegador (reload/goto) antes de re-navegar"
+        )
+        reset_ok = False
+        try:
+            reset_ok = _reset_navegador(page)
+        except (CredenciaisInvalidasError, NavegacaoError, SessaoEsgotadaError):
+            raise
+        except Exception as e:
+            log.bind(etapa="recuperacao", tecnico=code_anterior).warning(
+                f"Reset do navegador falhou: {e} — tentando navegação direta"
+            )
+
+        if reset_ok:
+            return True
+
+        # Fallback: navegação direta sem reload (funciona se o problema for
+        # apenas um modal residual que o Esc não limpou).
+        log.bind(etapa="recuperacao", tecnico=code_anterior).info(
+            "Fallback: navegação direta sem reload"
         )
         try:
             navegar_ate_rotina(page)
             return True
         except NavegacaoError as e:
             log.bind(etapa="recuperacao", tecnico=code_anterior).error(
-                f"Falha ao re-navegar da home: {e}"
+                f"Falha ao re-navegar da home (fallback): {e}"
             )
-            # Re-navegação da home falhou — tentar reset nuclear antes de desistir
-            log.bind(etapa="recuperacao", tecnico=code_anterior).warning(
-                "Re-navegação da home falhou — tentando reset nuclear (reload/goto)"
-            )
-            try:
-                if _reset_navegador(page):
-                    return True
-            except (CredenciaisInvalidasError, NavegacaoError, SessaoEsgotadaError):
-                raise
-            except Exception as e2:
-                log.bind(etapa="recuperacao", tecnico=code_anterior).error(
-                    f"Reset nuclear falhou: {e2}"
-                )
             return False
 
     # 4. Estado desconhecido — último recurso antes de abortar.

@@ -104,41 +104,77 @@ def _localizar_em_frames(
 def _frame_login(page: Page, timeout_ms: int = 60_000) -> Frame | None:
     """Localiza o frame que hospeda o formulário de login.
 
-    Estratégia: busca o frame (main ou iframe) que contém `input[name="login"]`.
-    O Protheus carrega o form num iframe `WA-WEBVIEW` que aparece tardiamente;
-    detectar pelo input é mais robusto do que casar pela URL do iframe (que
-    embute identificador de ambiente — `protheuslib-tface_env_<id>_prod/login`).
+    Estratégia: busca no page principal E em todos os iframes por campos de
+    input que indicam a tela de login. O Protheus carrega o form num iframe
+    `WA-WEBVIEW` que aparece tardiamente; mas versões recentes podem renderizar
+    o form no documento principal.
+
+    Seletores tentados em ordem (fallback):
+      1. `input[name="login"]`     — seletor clássico do Protheus
+      2. `input[name="username"]`   — alternativa comum
+      3. `input[name="login_name"]` — variante
+      4. `input[type="text"]`       — genérico (último recurso, pega o primeiro visível)
     """
     import time as _time
+
+    SELETORES_LOGIN = [
+        'input[name="login"]',
+        'input[name="username"]',
+        'input[name="login_name"]',
+    ]
+
     deadline = _time.monotonic() + timeout_ms / 1000.0
     urls_vistas: set[str] = set()
+
     while _time.monotonic() < deadline:
-        for f in page.frames:
-            if f.url and f.url not in urls_vistas:
-                urls_vistas.add(f.url)
-                log.bind(etapa="login").debug(f"frame visto: {f.url!r}")
+        # Busca em page principal + todos os frames (inclusive page.frames retorna
+        # apenas iframes filhos, não o main_frame — por isso incluímos page)
+        contextos: list[Frame | Page] = [page, *page.frames]
+
+        for ctx in contextos:
             try:
-                campo = f.locator('input[name="login"]').first
-                if campo.count() > 0 and campo.is_visible(timeout=200):
-                    log.bind(etapa="login").debug(
-                        f"frame de login localizado: {f.url!r}"
-                    )
-                    return f
+                if hasattr(ctx, 'url') and ctx.url and ctx.url not in urls_vistas:
+                    urls_vistas.add(str(ctx.url))
+                    log.bind(etapa="login").debug(f"frame/ctx visto: {ctx.url!r}")
             except Exception:
-                continue
+                pass
+
+            for sel in SELETORES_LOGIN:
+                try:
+                    campo = ctx.locator(sel).first
+                    if campo.count() > 0 and campo.is_visible(timeout=200):
+                        # Se for um Page (não Frame), retorna o main_frame
+                        f = ctx if isinstance(ctx, Frame) else page.main_frame
+                        log.bind(etapa="login").debug(
+                            f"frame de login localizado via '{sel}' "
+                            f"em {'main' if f == page.main_frame else 'iframe'}: "
+                            f"{f.url if hasattr(f, 'url') else 'N/A'}"
+                        )
+                        return f
+                except Exception:
+                    continue
+
         _time.sleep(0.4)
+
     log.bind(etapa="login").warning(
-        f"frame de login não encontrado em {timeout_ms}ms — frames vistos: {urls_vistas}"
+        f"frame de login não encontrado em {timeout_ms}ms — "
+        f"frames vistos: {urls_vistas}"
     )
     return None
 
 
 def _detectar_credencial_invalida(page: Page) -> bool:
-    """Heurística: home não chegou e ainda vemos a tela de usuário/senha."""
-    try:
-        return page.locator('input[type="password"]').first.is_visible(timeout=2000)
-    except Exception:
-        return aguardar_imagem(page, "03_insira_usuario.png", timeout=3) is not None
+    """Heurística: home não chegou e ainda vemos a tela de usuário/senha.
+
+    Varre page principal + todos os frames (o form pode estar em qualquer um).
+    """
+    for ctx in [page, *page.frames]:
+        try:
+            if ctx.locator('input[type="password"]').first.is_visible(timeout=500):
+                return True
+        except Exception:
+            continue
+    return aguardar_imagem(page, "03_insira_usuario.png", timeout=3) is not None
 
 
 def _preencher_usuario(page: Page) -> bool:
@@ -371,23 +407,23 @@ def _executar_login(page: Page) -> None:
 def detectar_logout(page: Page) -> bool:
     """Detecta se a sessão expirou ou foi encerrada.
     
-    Heurística: Verifica se algum elemento da tela de login (passos 03/04/05) está visível.
+    Heurística: Verifica se algum elemento da tela de login (passos 03/04/05)
+    está visível no page principal ou em qualquer iframe.
     """
     log.bind(etapa="sessao").debug("Verificando se houve logout...")
     
-    # 1. Tenta via DOM (mais rápido)
     for ctx in [page, *page.frames]:
-        try:
-            if ctx.locator('input[name="login"]').first.is_visible(timeout=500):
-                log.bind(etapa="sessao").warning("Logout detectado via DOM (campo login visível)")
-                return True
-            if ctx.locator('input[name="password"]').first.is_visible(timeout=500):
-                log.bind(etapa="sessao").warning("Logout detectado via DOM (campo password visível)")
-                return True
-        except Exception:
-            continue
-            
-    # 2. Tenta via template matching (fallback)
+        for sel in ('input[name="login"]', 'input[type="password"]'):
+            try:
+                if ctx.locator(sel).first.is_visible(timeout=300):
+                    log.bind(etapa="sessao").warning(
+                        f"Logout detectado via DOM ({sel})"
+                    )
+                    return True
+            except Exception:
+                continue
+    
+    # Fallback via template matching
     if aguardar_imagem(page, "03_insira_usuario.png", timeout=2, threshold=0.5) is not None:
         log.bind(etapa="sessao").warning("Logout detectado via matching (campo usuário)")
         return True
@@ -597,7 +633,57 @@ def _executar_navegacao_rotina(page: Page, rotina: Literal["mat_estoque", "trans
                 
         if not clicou_fav:
             clicou_fav = clicar_imagem(page, "07_pagina_home_clicar_favoritos.png", timeout=15, threshold=0.65)
-            
+
+        if not clicou_fav:
+            # Last resort: JavaScript click em qualquer elemento com texto "Favoritos"
+            # útil quando o DOM existe mas o Angular não bindou o event handler,
+            # ou uma camada transparente impede o Playwright de interagir.
+            log.bind(etapa="navegacao").info("Tentando JavaScript click em Favoritos (last resort)...")
+            try:
+                clicou_fav = page.evaluate("""() => {
+                    const seletores = [
+                        '[title="Favoritos"]',
+                        '[aria-label="Favoritos"]',
+                        '.wa-menu-item:has-text("Favoritos")',
+                        'po-menu-item:has-text("Favoritos")',
+                        'a:has-text("Favoritos")',
+                        'span:has-text("Favoritos")',
+                        'div:has-text("Favoritos")',
+                    ];
+                    // page-level
+                    for (const sel of seletores) {
+                        const el = document.querySelector(sel);
+                        if (el) { el.click(); return true; }
+                    }
+                    // iframes
+                    for (const iframe of document.querySelectorAll('iframe')) {
+                        try {
+                            const doc = iframe.contentDocument || iframe.contentWindow?.document;
+                            if (!doc) continue;
+                            for (const sel of seletores) {
+                                const el = doc.querySelector(sel);
+                                if (el) { el.click(); return true; }
+                            }
+                        } catch(e) { /* cross-origin */ }
+                    }
+                    // text search — any visible element containing "Favoritos"
+                    const all = document.querySelectorAll('*');
+                    for (const el of all) {
+                        if (el.offsetWidth === 0 || el.offsetHeight === 0) continue;
+                        if (el.textContent?.trim() === 'Favoritos' && el.children.length === 0) {
+                            el.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }""")
+                if clicou_fav:
+                    log.bind(etapa="navegacao").info("Clicou em Favoritos via JavaScript (last resort)")
+                else:
+                    log.bind(etapa="navegacao").warning("JavaScript click em Favoritos também falhou — elemento não encontrado na árvore DOM")
+            except Exception as js_err:
+                log.bind(etapa="navegacao").debug(f"JavaScript click em Favoritos lançou exceção: {js_err}")
+
         if not clicou_fav:
             tirar_screenshot(page, etapa="falha_07_favoritos", evidencia=True)
             raise NavegacaoError("Passo 07: Falha ao clicar em Favoritos")
