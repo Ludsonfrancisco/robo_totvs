@@ -1,6 +1,6 @@
 # Robô TOTVS — Playwright + Chrome real (Cloud TOTVS exige Chrome, não Chromium).
 # Base oficial do Playwright já vem com libs do sistema necessárias.
-FROM mcr.microsoft.com/playwright/python:v1.49.0-jammy
+FROM mcr.microsoft.com/playwright/python:v1.61.0-jammy
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
