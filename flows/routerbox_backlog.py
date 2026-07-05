@@ -402,12 +402,15 @@ def run_routerbox_backlog(
                 page = context.new_page()
                 try:
                     destino = out / f"{inst.name.lower()}_backlog_{today}.xlsx"
+                    # LOGA usa senha diferente da ACERTA
+                    usuario = settings.ROUTERBOX_USER
+                    senha = settings.ROUTERBOX_LOGA_PASS if inst.name == "LOGA" and settings.ROUTERBOX_LOGA_PASS else settings.ROUTERBOX_PASS
                     baixar_backlog_routerbox(
                         page=page,
                         instance=inst,
                         destino=destino,
-                        usuario=settings.ROUTERBOX_USER,
-                        senha=settings.ROUTERBOX_PASS,
+                        usuario=usuario,
+                        senha=senha,
                         timeout_s=settings.ROUTERBOX_DOWNLOAD_TIMEOUT_S,
                     )
                     downloaded[inst.name] = destino
