@@ -323,37 +323,37 @@ def baixar_backlog_routerbox(
     """)
     page.wait_for_timeout(3000)
 
-    # Selecionar filtro salvo — busca por nome exato ou parcial (DMAIS)
+    # Selecionar filtro salvo — busca cross-frame via JS
     filtro_ok = False
-    for ctx in _contexts(page):
-        try:
-            sel = ctx.locator('select#sel_recup_filters_bot, select[name="sel_recup_filters_bot"]').first
-            if sel.count():
-                sel.scroll_into_view_if_needed(timeout=5000)
-                try:
-                    sel.select_option(label=filter_label, timeout=8000)
-                    log.info(f"OK {name}: filtro selecionado por label exato")
-                    page.wait_for_timeout(6000)
-                    filtro_ok = True
-                    break
-                except Exception:
-                    pass
-                # Fallback: procura por nome parcial (DMAIS)
-                value = sel.evaluate("""(s, wanted) => {
-                    for (const o of s.options) {
-                        const t = (o.textContent || '').trim();
-                        if (t === wanted || t.includes('DMAIS') || t.includes('dmais')) return o.value;
-                    }
-                    return null;
-                }""", filter_label)
-                if value:
+    value = page.evaluate("""(wanted) => {
+        const search = (doc) => {
+            const sel = doc.querySelector('select#sel_recup_filters_bot') || doc.querySelector('select[name="sel_recup_filters_bot"]');
+            if (sel) {
+                for (const o of sel.options) {
+                    const t = (o.textContent || '').trim();
+                    if (t === wanted || t.includes('DMAIS') || t.includes('dmais')) return o.value;
+                }
+            }
+            for (const frame of doc.querySelectorAll('iframe, frame')) {
+                try { const r = search(frame.contentDocument); if (r) return r; } catch(e) {}
+            }
+            return null;
+        };
+        return search(document);
+    }""", filter_label)
+    if value:
+        # Seleciona o option encontrado
+        for ctx in _contexts(page):
+            try:
+                sel = ctx.locator('select#sel_recup_filters_bot, select[name="sel_recup_filters_bot"]').first
+                if sel.count():
                     sel.select_option(value=value)
                     log.info(f"OK {name}: filtro DMAIS selecionado por value={value}")
                     page.wait_for_timeout(6000)
                     filtro_ok = True
                     break
-        except Exception:
-            continue
+            except Exception:
+                continue
     if not filtro_ok:
         raise RuntimeError(f"{name}: filtro '{filter_label}' não encontrado")
 
