@@ -264,28 +264,50 @@ def baixar_backlog_routerbox(
 
     _fechar_modal_novidades(page)
 
-    # Navegação: Atendimentos/Planejamento de OS → Execução (menu pós-login)
-    log.info(f"{name}: clicando Atendimentos/Planejamento de OS")
-    _click_any(page, [
-        'a:has-text("Atendimentos/Planejamento")', 'a:has-text("Atendimentos")',
-        'a:has-text("Planejamento de OS")',
-        '#item_56', 'a#item_56',
-    ], 'Atendimentos', timeout=5000)
+    # Navegação: JS puro — ignora visibilidade e frames do Playwright
+    log.info(f"{name}: navegando para Atendimentos/Planejamento de OS")
+    page.evaluate("""
+        () => {
+            const links = document.querySelectorAll('a');
+            for (const a of links) {
+                if (a.textContent.includes('Atendimentos') || a.textContent.includes('Planejamento de OS')) {
+                    a.click();
+                    return 'clicou';
+                }
+            }
+            return 'nao achou';
+        }
+    """)
     page.wait_for_timeout(2000)
 
-    log.info(f"{name}: clicando Execução")
-    _click_any(page, [
-        'a:has-text("Execução")',
-        '#item_59', 'a#item_59',
-    ], 'Execução', timeout=5000)
+    log.info(f"{name}: navegando para Execução")
+    page.evaluate("""
+        () => {
+            const links = document.querySelectorAll('a');
+            for (const a of links) {
+                if (a.textContent.includes('Execução') || a.textContent.includes('Execucao')) {
+                    a.click();
+                    return 'clicou';
+                }
+            }
+            return 'nao achou';
+        }
+    """)
     page.wait_for_timeout(5000)
 
     # Pesquisar (topo)
     log.info(f"{name}: clicando Pesquisar")
-    _click_any(page, [
-        '#pesq_top', 'a#pesq_top', 'a:has-text("Pesquisar")',
-        'text=Pesquisar',
-    ], 'Pesquisar topo', timeout=5000)
+    page.evaluate("""
+        () => {
+            const el = document.querySelector('#pesq_top') || document.querySelector('a#pesq_top');
+            if (el) { el.click(); return 'clicou'; }
+            const links = document.querySelectorAll('a');
+            for (const a of links) {
+                if (a.textContent.includes('Pesquisar')) { a.click(); return 'clicou'; }
+            }
+            return 'nao achou';
+        }
+    """)
     page.wait_for_timeout(3000)
 
     # Selecionar filtro salvo
