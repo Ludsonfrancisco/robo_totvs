@@ -154,25 +154,35 @@ def _click_any(page: Page, selectors: list[str], name: str, timeout: int = 8000)
         loc.click(timeout=timeout)
         log.info(f"OK click {name}: {sel}")
     except Exception:
-        # Fallback: JS click em elemento mesmo oculto
+        # Fallback: JS click em elemento mesmo oculto, busca em todos os frames
+        import re
+        found = False
         for sel in selectors:
-            # Converte seletor Playwright para querySelector
-            js_sel = sel.replace(':has-text("', '').replace('")', '')
-            if sel.startswith('text='):
-                js_sel = sel[5:]
-                code = f"""() => {{ const el = Array.from(document.querySelectorAll('a,button,span,li,div')).find(e => e.textContent.trim() === '{js_sel}'); if (el) {{ el.click(); return true; }} return false; }}"""
-            elif sel.startswith('a:has-text('):
-                code = f"""() => {{ const el = Array.from(document.querySelectorAll('a')).find(e => e.textContent.includes('{js_sel}')); if (el) {{ el.click(); return true; }} return false; }}"""
-            else:
-                code = f"""() => {{ const el = document.querySelector('{sel}'); if (el) {{ el.click(); return true; }} return false; }}"""
             try:
-                result = page.evaluate(code)
-                if result:
-                    log.info(f"OK click {name}: {sel} (via JS)")
+                if sel.startswith('text='):
+                    js_text = sel[5:]
+                    code = f"""() => {{ const el = Array.from(document.querySelectorAll('a,button,span,li,div')).find(e => e.textContent.trim() === '{js_text}'); if (el) {{ el.click(); return true; }} return false; }}"""
+                elif ':has-text(' in sel:
+                    m = re.search(r':has-text\("(.+?)"\)', sel)
+                    js_text = m.group(1) if m else ''
+                    code = f"""() => {{ const el = Array.from(document.querySelectorAll('a')).find(e => e.textContent.includes('{js_text}')); if (el) {{ el.click(); return true; }} return false; }}"""
+                else:
+                    code = f"""() => {{ const el = document.querySelector('{sel}'); if (el) {{ el.click(); return true; }} return false; }}"""
+                # Tenta em page + todos os frames
+                for ctx in _contexts(page):
+                    try:
+                        result = ctx.evaluate(code)
+                        if result:
+                            log.info(f"OK click {name}: {sel} (via JS)")
+                            found = True
+                            break
+                    except Exception:
+                        continue
+                if found:
                     break
             except Exception:
                 continue
-        else:
+        if not found:
             raise RuntimeError(f"nenhum seletor clicável: {selectors}")
     page.wait_for_timeout(1000)
     return loc if 'loc' in dir() else None
@@ -225,33 +235,45 @@ def baixar_backlog_routerbox(
 
     page.goto(url, wait_until="domcontentloaded", timeout=60000)
     page.wait_for_timeout(2000)
+    # Login — tentar DOM primeiro, fallback JS (RouterBox mudou seletores)
+    try:
+        u, _, us = _first_visible(page, user_selectors, timeout=5000)
+        u.fill(usuario)
+        log.info(f"OK usuário preenchido via {us}")
+    except Exception:
+        log.info("preenchendo usuário via JS fallback")
+        page.evaluate(f"""() => {{ const el = document.querySelector('input[name=\"usuario\"]') || document.querySelector('input[name=\"login\"]') || document.querySelector('input[type=\"text\"]'); if (el) {{ el.value = '{usuario}'; el.dispatchEvent(new Event('input', {{bubbles:true}})); }} }}""")
 
-    u, _, us = _first_visible(page, user_selectors, timeout=10000)
-    u.fill(usuario)
-    log.info(f"OK usuário preenchido via {us}")
-
-    p, _, ps = _first_visible(page, pass_selectors, timeout=10000)
-    p.fill(senha)
-    log.info(f"OK senha preenchida via {ps}")
+    try:
+        p, _, ps = _first_visible(page, pass_selectors, timeout=5000)
+        p.fill(senha)
+        log.info(f"OK senha preenchida via {ps}")
+    except Exception:
+        log.info("preenchendo senha via JS fallback")
+        page.evaluate(f"""() => {{ const el = document.querySelector('input[name=\"senha\"]') || document.querySelector('input[type=\"password\"]'); if (el) {{ el.value = '{senha}'; el.dispatchEvent(new Event('input', {{bubbles:true}})); }} }}""")
 
     try:
         _click_any(page, [
             'button:has-text("Entrar")', 'input[value*="Entrar"]',
             'a:has-text("Entrar")', 'text=Entrar',
+            '#sub_form_b', 'a#sub_form_b',
         ], 'entrar', timeout=5000)
     except Exception:
+        # Fallback: JS submit + Enter
+        page.evaluate("document.querySelector('a#sub_form_b')?.click() || document.querySelector('form')?.submit()")
         page.keyboard.press("Enter")
-        log.info("OK submit via Enter")
+        log.info("OK submit via JS fallback")
 
     page.wait_for_load_state("domcontentloaded", timeout=30000)
     page.wait_for_timeout(5000)
 
     _fechar_modal_novidades(page)
 
-    # Navegação: Atendimentos → Execução (menu horizontal)
-    log.info(f"{name}: clicando Atendimentos")
+    # Navegação: Atendimentos/Planejamento de OS → Execução (menu pós-login)
+    log.info(f"{name}: clicando Atendimentos/Planejamento de OS")
     _click_any(page, [
-        'a:has-text("Atendimentos")', 'a:has-text("Atendimento")',
+        'a:has-text("Atendimentos/Planejamento")', 'a:has-text("Atendimentos")',
+        'a:has-text("Planejamento de OS")',
         '#item_56', 'a#item_56',
     ], 'Atendimentos', timeout=5000)
     page.wait_for_timeout(2000)
