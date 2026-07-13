@@ -264,18 +264,22 @@ def baixar_backlog_routerbox(
 
     _fechar_modal_novidades(page)
 
-    # Navegação: JS puro — ignora visibilidade e frames do Playwright
+    # Navegação: JS puro cross-frame
     log.info(f"{name}: navegando para Atendimentos/Planejamento de OS")
     page.evaluate("""
         () => {
-            const links = document.querySelectorAll('a');
-            for (const a of links) {
-                if (a.textContent.includes('Atendimentos') || a.textContent.includes('Planejamento de OS')) {
-                    a.click();
-                    return 'clicou';
+            const search = (doc) => {
+                for (const a of doc.querySelectorAll('a')) {
+                    if (a.textContent.includes('Atendimentos') || a.textContent.includes('Planejamento de OS')) {
+                        a.click(); return true;
+                    }
                 }
-            }
-            return 'nao achou';
+                for (const frame of doc.querySelectorAll('iframe, frame')) {
+                    try { if (search(frame.contentDocument)) return true; } catch(e) {}
+                }
+                return false;
+            };
+            return search(document) ? 'clicou' : 'nao achou';
         }
     """)
     page.wait_for_timeout(2000)
@@ -283,14 +287,18 @@ def baixar_backlog_routerbox(
     log.info(f"{name}: navegando para Execução")
     page.evaluate("""
         () => {
-            const links = document.querySelectorAll('a');
-            for (const a of links) {
-                if (a.textContent.includes('Execução') || a.textContent.includes('Execucao')) {
-                    a.click();
-                    return 'clicou';
+            const search = (doc) => {
+                for (const a of doc.querySelectorAll('a')) {
+                    if (a.textContent.includes('Execução') || a.textContent.includes('Execucao')) {
+                        a.click(); return true;
+                    }
                 }
-            }
-            return 'nao achou';
+                for (const frame of doc.querySelectorAll('iframe, frame')) {
+                    try { if (search(frame.contentDocument)) return true; } catch(e) {}
+                }
+                return false;
+            };
+            return search(document) ? 'clicou' : 'nao achou';
         }
     """)
     page.wait_for_timeout(5000)
@@ -299,18 +307,23 @@ def baixar_backlog_routerbox(
     log.info(f"{name}: clicando Pesquisar")
     page.evaluate("""
         () => {
-            const el = document.querySelector('#pesq_top') || document.querySelector('a#pesq_top');
-            if (el) { el.click(); return 'clicou'; }
-            const links = document.querySelectorAll('a');
-            for (const a of links) {
-                if (a.textContent.includes('Pesquisar')) { a.click(); return 'clicou'; }
-            }
-            return 'nao achou';
+            const search = (doc) => {
+                let el = doc.querySelector('#pesq_top') || doc.querySelector('a#pesq_top');
+                if (el) { el.click(); return true; }
+                for (const a of doc.querySelectorAll('a')) {
+                    if (a.textContent.includes('Pesquisar')) { a.click(); return true; }
+                }
+                for (const frame of doc.querySelectorAll('iframe, frame')) {
+                    try { if (search(frame.contentDocument)) return true; } catch(e) {}
+                }
+                return false;
+            };
+            return search(document) ? 'clicou' : 'nao achou';
         }
     """)
     page.wait_for_timeout(3000)
 
-    # Selecionar filtro salvo
+    # Selecionar filtro salvo — busca por nome exato ou parcial (DMAIS)
     filtro_ok = False
     for ctx in _contexts(page):
         try:
@@ -318,47 +331,69 @@ def baixar_backlog_routerbox(
             if sel.count():
                 sel.scroll_into_view_if_needed(timeout=5000)
                 try:
-                    sel.select_option(label=filter_label, timeout=10000)
-                    log.info(f"OK {name}: filtro selecionado por label")
+                    sel.select_option(label=filter_label, timeout=8000)
+                    log.info(f"OK {name}: filtro selecionado por label exato")
                     page.wait_for_timeout(6000)
                     filtro_ok = True
                     break
                 except Exception:
-                    value = sel.evaluate("""(s, wanted) => {
-                        for (const o of s.options) {
-                            if ((o.textContent || '').trim() === wanted) return o.value;
-                        }
-                        return null;
-                    }""", filter_label)
-                    if value:
-                        sel.select_option(value=value)
-                        log.info(f"OK {name}: filtro selecionado por value={value}")
-                        page.wait_for_timeout(6000)
-                        filtro_ok = True
-                        break
+                    pass
+                # Fallback: procura por nome parcial (DMAIS)
+                value = sel.evaluate("""(s, wanted) => {
+                    for (const o of s.options) {
+                        const t = (o.textContent || '').trim();
+                        if (t === wanted || t.includes('DMAIS') || t.includes('dmais')) return o.value;
+                    }
+                    return null;
+                }""", filter_label)
+                if value:
+                    sel.select_option(value=value)
+                    log.info(f"OK {name}: filtro DMAIS selecionado por value={value}")
+                    page.wait_for_timeout(6000)
+                    filtro_ok = True
+                    break
         except Exception:
             continue
     if not filtro_ok:
         raise RuntimeError(f"{name}: filtro '{filter_label}' não encontrado")
 
-    # Pesquisar (rodapé)
-    _click_any(page, [
-        '#sc_b_pesq_bot', 'a#sc_b_pesq_bot', 'button#sc_b_pesq_bot',
-        'input#sc_b_pesq_bot', 'text=Pesquisar',
-    ], 'Pesquisar rodapé', timeout=15000)
+    # Pesquisar (rodapé) — JS puro
+    log.info(f"{name}: clicando Pesquisar rodapé")
+    page.evaluate("""
+        () => {
+            const ids = ['#sc_b_pesq_bot', 'a#sc_b_pesq_bot', 'button#sc_b_pesq_bot', 'input#sc_b_pesq_bot'];
+            for (const id of ids) {
+                const el = document.querySelector(id);
+                if (el) { el.click(); return 'clicou'; }
+            }
+            for (const a of document.querySelectorAll('a')) {
+                if (a.textContent.includes('Pesquisar')) { a.click(); return 'clicou'; }
+            }
+            return 'nao achou';
+        }
+    """)
     page.wait_for_timeout(8000)
 
-    # Grupo botões → Excel
-    _click_any(page, [
-        '#sc_btgp_btn_group_1_top', 'button#sc_btgp_btn_group_1_top',
-        'a#sc_btgp_btn_group_1_top', '[id="sc_btgp_btn_group_1_top"]',
-    ], 'grupo botoes', timeout=15000)
+    # Grupo botões → Excel — JS puro
+    log.info(f"{name}: clicando grupo botoes")
+    page.evaluate("""
+        () => {
+            const el = document.querySelector('#sc_btgp_btn_group_1_top') || document.querySelector('button#sc_btgp_btn_group_1_top');
+            if (el) { el.click(); return 'clicou'; }
+            return 'nao achou';
+        }
+    """)
     page.wait_for_timeout(1000)
 
-    _click_any(page, [
-        'text=Excel', 'a:has-text("Excel")', 'button:has-text("Excel")',
-        'li:has-text("Excel")',
-    ], 'Excel', timeout=15000)
+    log.info(f"{name}: clicando Excel")
+    page.evaluate("""
+        () => {
+            for (const el of document.querySelectorAll('a, button, li')) {
+                if ((el.textContent||'').includes('Excel')) { el.click(); return 'clicou'; }
+            }
+            return 'nao achou';
+        }
+    """)
     log.info(f"{name}: aguardando geração do XLSX/link Baixar")
 
     # Polling para o link "Baixar"
