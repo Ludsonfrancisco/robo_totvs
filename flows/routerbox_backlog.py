@@ -235,22 +235,17 @@ def baixar_backlog_routerbox(
 
     page.goto(url, wait_until="domcontentloaded", timeout=60000)
     page.wait_for_timeout(2000)
-    # Login — tentar DOM primeiro, fallback JS (RouterBox mudou seletores)
-    try:
-        u, _, us = _first_visible(page, user_selectors, timeout=5000)
-        u.fill(usuario)
-        log.info(f"OK usuário preenchido via {us}")
-    except Exception:
-        log.info("preenchendo usuário via JS fallback")
-        page.evaluate(f"""() => {{ const el = document.querySelector('input[name=\"usuario\"]') || document.querySelector('input[name=\"login\"]') || document.querySelector('input[type=\"text\"]'); if (el) {{ el.value = '{usuario}'; el.dispatchEvent(new Event('input', {{bubbles:true}})); }} }}""")
 
-    try:
-        p, _, ps = _first_visible(page, pass_selectors, timeout=5000)
-        p.fill(senha)
-        log.info(f"OK senha preenchida via {ps}")
-    except Exception:
-        log.info("preenchendo senha via JS fallback")
-        page.evaluate(f"""() => {{ const el = document.querySelector('input[name=\"senha\"]') || document.querySelector('input[type=\"password\"]'); if (el) {{ el.value = '{senha}'; el.dispatchEvent(new Event('input', {{bubbles:true}})); }} }}""")
+    # Login via JS (mais confiável que DOM — RouterBox/ScriptCase muda seletores)
+    page.evaluate(f"""
+        () => {{
+            const u = document.querySelector('input[name="usuario"]') || document.querySelector('input[name="login"]') || document.querySelector('input[type="text"]:not([hidden])');
+            if (u) {{ u.value = '{usuario}'; u.dispatchEvent(new Event('input', {{bubbles:true}})); }}
+            const s = document.querySelector('input[name="senha"]') || document.querySelector('input[type="password"]');
+            if (s) {{ s.value = '{senha}'; s.dispatchEvent(new Event('input', {{bubbles:true}})); }}
+        }}
+    """)
+    log.info("OK login preenchido via JS")
 
     try:
         _click_any(page, [
