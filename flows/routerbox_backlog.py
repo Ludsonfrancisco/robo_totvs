@@ -148,12 +148,34 @@ def _first_visible(page: Page, selectors: list[str], timeout: int = 1500):
 
 
 def _click_any(page: Page, selectors: list[str], name: str, timeout: int = 8000):
-    """Clica no primeiro elemento visível que encontrar."""
-    loc, ctx, sel = _first_visible(page, selectors, timeout=timeout)
-    loc.click(timeout=timeout)
-    log.info(f"OK click {name}: {sel}")
+    """Clica no primeiro elemento que encontrar, visível ou não (JS fallback)."""
+    try:
+        loc, ctx, sel = _first_visible(page, selectors, timeout=min(timeout, 3000))
+        loc.click(timeout=timeout)
+        log.info(f"OK click {name}: {sel}")
+    except Exception:
+        # Fallback: JS click em elemento mesmo oculto
+        for sel in selectors:
+            # Converte seletor Playwright para querySelector
+            js_sel = sel.replace(':has-text("', '').replace('")', '')
+            if sel.startswith('text='):
+                js_sel = sel[5:]
+                code = f"""() => {{ const el = Array.from(document.querySelectorAll('a,button,span,li,div')).find(e => e.textContent.trim() === '{js_sel}'); if (el) {{ el.click(); return true; }} return false; }}"""
+            elif sel.startswith('a:has-text('):
+                code = f"""() => {{ const el = Array.from(document.querySelectorAll('a')).find(e => e.textContent.includes('{js_sel}')); if (el) {{ el.click(); return true; }} return false; }}"""
+            else:
+                code = f"""() => {{ const el = document.querySelector('{sel}'); if (el) {{ el.click(); return true; }} return false; }}"""
+            try:
+                result = page.evaluate(code)
+                if result:
+                    log.info(f"OK click {name}: {sel} (via JS)")
+                    break
+            except Exception:
+                continue
+        else:
+            raise RuntimeError(f"nenhum seletor clicável: {selectors}")
     page.wait_for_timeout(1000)
-    return loc
+    return loc if 'loc' in dir() else None
 
 
 def _fechar_modal_novidades(page: Page) -> None:
@@ -227,31 +249,26 @@ def baixar_backlog_routerbox(
     _fechar_modal_novidades(page)
 
     # Navegação: Atendimentos → Execução (menu horizontal)
-    # IDs do menu mudam com frequência no RouterBox — busca por texto é mais estável.
-    # Os itens do menu podem não estar visíveis (fora do viewport) — usar JS click.
     log.info(f"{name}: clicando Atendimentos")
-    page.evaluate("""
-        () => {
-            const el = document.querySelector('a') && Array.from(document.querySelectorAll('a')).find(a => a.textContent.includes('Atendimentos') || a.textContent.includes('Atendimento'));
-            if (el) el.click();
-        }
-    """)
+    _click_any(page, [
+        'a:has-text("Atendimentos")', 'a:has-text("Atendimento")',
+        '#item_56', 'a#item_56',
+    ], 'Atendimentos', timeout=5000)
     page.wait_for_timeout(2000)
 
     log.info(f"{name}: clicando Execução")
-    page.evaluate("""
-        () => {
-            const el = Array.from(document.querySelectorAll('a')).find(a => a.textContent.includes('Execução'));
-            if (el) el.click();
-        }
-    """)
+    _click_any(page, [
+        'a:has-text("Execução")',
+        '#item_59', 'a#item_59',
+    ], 'Execução', timeout=5000)
     page.wait_for_timeout(5000)
 
     # Pesquisar (topo)
+    log.info(f"{name}: clicando Pesquisar")
     _click_any(page, [
         '#pesq_top', 'a#pesq_top', 'a:has-text("Pesquisar")',
         'text=Pesquisar',
-    ], 'Pesquisar topo', timeout=15000)
+    ], 'Pesquisar topo', timeout=5000)
     page.wait_for_timeout(3000)
 
     # Selecionar filtro salvo
