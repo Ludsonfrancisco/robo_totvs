@@ -227,19 +227,24 @@ def baixar_backlog_routerbox(
     _fechar_modal_novidades(page)
 
     # Navegação: Atendimentos → Execução (menu horizontal)
-    # IDs do menu mudam com frequência no RouterBox — busca por texto é mais estável
+    # IDs do menu mudam com frequência no RouterBox — busca por texto é mais estável.
+    # Os itens do menu podem não estar visíveis (fora do viewport) — usar JS click.
     log.info(f"{name}: clicando Atendimentos")
-    _click_any(page, [
-        'a:has-text("Atendimentos")', 'a:has-text("Atendimento")',
-        '#item_56', 'a#item_56',
-    ], 'Atendimentos', timeout=10000)
+    page.evaluate("""
+        () => {
+            const el = document.querySelector('a') && Array.from(document.querySelectorAll('a')).find(a => a.textContent.includes('Atendimentos') || a.textContent.includes('Atendimento'));
+            if (el) el.click();
+        }
+    """)
     page.wait_for_timeout(2000)
 
     log.info(f"{name}: clicando Execução")
-    _click_any(page, [
-        'a:has-text("Execução")',
-        '#item_59', 'a#item_59',
-    ], 'Execução', timeout=10000)
+    page.evaluate("""
+        () => {
+            const el = Array.from(document.querySelectorAll('a')).find(a => a.textContent.includes('Execução'));
+            if (el) el.click();
+        }
+    """)
     page.wait_for_timeout(5000)
 
     # Pesquisar (topo)
