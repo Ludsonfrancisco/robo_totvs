@@ -226,14 +226,20 @@ def baixar_backlog_routerbox(
 
     _fechar_modal_novidades(page)
 
-    # Navegação: Atendimentos → Execução (menu horizontal, itens fora do viewport)
-    # O menu horizontal do RouterBox fica fora do viewport padrão — usar JS click
-    log.info(f"{name}: clicando Atendimentos via JS")
-    page.evaluate("document.querySelector('a#item_56').click()")
+    # Navegação: Atendimentos → Execução (menu horizontal)
+    # IDs do menu mudam com frequência no RouterBox — busca por texto é mais estável
+    log.info(f"{name}: clicando Atendimentos")
+    _click_any(page, [
+        'a:has-text("Atendimentos")', 'a:has-text("Atendimento")',
+        '#item_56', 'a#item_56',
+    ], 'Atendimentos', timeout=10000)
     page.wait_for_timeout(2000)
 
-    log.info(f"{name}: clicando Execução via JS")
-    page.evaluate("document.querySelector('a#item_59').click()")
+    log.info(f"{name}: clicando Execução")
+    _click_any(page, [
+        'a:has-text("Execução")',
+        '#item_59', 'a#item_59',
+    ], 'Execução', timeout=10000)
     page.wait_for_timeout(5000)
 
     # Pesquisar (topo)
