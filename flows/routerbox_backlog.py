@@ -264,14 +264,16 @@ def baixar_backlog_routerbox(
 
     _fechar_modal_novidades(page)
 
-    # Navegação: JS puro cross-frame
+    # Navegação: JS puro cross-frame com dispatchEvent (ScriptCase usa eventos customizados)
     log.info(f"{name}: navegando para Atendimentos/Planejamento de OS")
     page.evaluate("""
         () => {
             const search = (doc) => {
                 for (const a of doc.querySelectorAll('a')) {
                     if (a.textContent.includes('Atendimentos') || a.textContent.includes('Planejamento de OS')) {
-                        a.click(); return true;
+                        a.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+                        a.click();
+                        return true;
                     }
                 }
                 for (const frame of doc.querySelectorAll('iframe, frame')) {
@@ -282,7 +284,7 @@ def baixar_backlog_routerbox(
             return search(document) ? 'clicou' : 'nao achou';
         }
     """)
-    page.wait_for_timeout(2000)
+    page.wait_for_timeout(3000)
 
     log.info(f"{name}: navegando para Execução")
     page.evaluate("""
@@ -290,7 +292,9 @@ def baixar_backlog_routerbox(
             const search = (doc) => {
                 for (const a of doc.querySelectorAll('a')) {
                     if (a.textContent.includes('Execução') || a.textContent.includes('Execucao')) {
-                        a.click(); return true;
+                        a.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+                        a.click();
+                        return true;
                     }
                 }
                 for (const frame of doc.querySelectorAll('iframe, frame')) {
@@ -301,15 +305,16 @@ def baixar_backlog_routerbox(
             return search(document) ? 'clicou' : 'nao achou';
         }
     """)
-    page.wait_for_timeout(5000)
+    page.wait_for_timeout(6000)
 
-    # Pesquisar (topo)
+    # Pesquisar (topo) — tenta também por seletor de atributo SC
     log.info(f"{name}: clicando Pesquisar")
     page.evaluate("""
         () => {
             const search = (doc) => {
-                let el = doc.querySelector('#pesq_top') || doc.querySelector('a#pesq_top');
-                if (el) { el.click(); return true; }
+                let el = doc.querySelector('#pesq_top') || doc.querySelector('a#pesq_top')
+                    || doc.querySelector('[id*=\"pesq\"]') || doc.querySelector('[onclick*=\"pesq\"]');
+                if (el) { el.click(); el.dispatchEvent(new MouseEvent('click', {bubbles: true})); return true; }
                 for (const a of doc.querySelectorAll('a')) {
                     if (a.textContent.includes('Pesquisar')) { a.click(); return true; }
                 }
