@@ -204,6 +204,14 @@ def _fechar_modal_novidades(page: Page) -> None:
 # Playwright download flow
 # ---------------------------------------------------------------------------
 
+def _find_frame(page: Page, url_fragment: str):
+    """Encontra o primeiro frame cuja URL contém o fragmento."""
+    for f in page.frames:
+        if url_fragment in f.url:
+            return f
+    return None
+
+
 def baixar_backlog_routerbox(
     page: Page,
     instance: RouterBoxInstance,
@@ -214,6 +222,15 @@ def baixar_backlog_routerbox(
 ) -> Path:
     """Baixa XLSX de backlog de uma instância RouterBox via Playwright.
 
+    Fluxo validado (13/07/2026):
+      1. Login via page.fill() — ScriptCase ignora page.evaluate(JS)
+      2. Menu hamburger -> "Atendimentos/Execução" (texto exato)
+      3. Frame cons_atendimentos -> #pesq_top (abre form de filtro)
+      4. #sel_recup_filters_bot -> seleciona filtro salvo
+      5. #sc_b_pesq_bot (pesquisar rodapé)
+      6. #sc_GerarXLS_top (botão Excel)
+      7. Link "Baixar" -> download
+
     Retorna o Path do arquivo salvo.
     """
     name = instance.name.lower()
@@ -222,206 +239,237 @@ def baixar_backlog_routerbox(
 
     log.info(f"== {name}: abrindo login {url} ==")
 
-    # Login
-    user_selectors = [
-        'input[name="login"]', 'input[name="usr_login"]',
-        'input[name="user"]', 'input[name="usuario"]',
-        'input[type="text"]', 'input:not([type])',
-    ]
-    pass_selectors = [
-        'input[type="password"]', 'input[name="password"]',
-        'input[name="senha"]', 'input[name="pswd"]',
-    ]
-
+    # ===== STEP 1: LOGIN via page.fill() =====
     page.goto(url, wait_until="domcontentloaded", timeout=60000)
-    page.wait_for_timeout(2000)
+    page.wait_for_timeout(3000)
 
-    # Login via JS (mais confiável que DOM — RouterBox/ScriptCase muda seletores)
-    page.evaluate(f"""
-        () => {{
-            const u = document.querySelector('input[name="usuario"]') || document.querySelector('input[name="login"]') || document.querySelector('input[type="text"]:not([hidden])');
-            if (u) {{ u.value = '{usuario}'; u.dispatchEvent(new Event('input', {{bubbles:true}})); }}
-            const s = document.querySelector('input[name="senha"]') || document.querySelector('input[type="password"]');
-            if (s) {{ s.value = '{senha}'; s.dispatchEvent(new Event('input', {{bubbles:true}})); }}
-        }}
-    """)
-    log.info("OK login preenchido via JS")
+    # page.fill() dispara eventos DOM corretos (keydown/keyup/input/change).
+    # page.evaluate(JS) não dispora esses eventos e o ScriptCase ignora o valor.
+    page.fill('input[name="usuario"]', usuario, timeout=5000)
+    page.fill('input[name="senha"]', senha, timeout=5000)
+    log.info(f"OK {name}: login preenchido via page.fill()")
 
+    # Entrar: o botão <a id="sub_form_b"> tem onclick="scBtnFn_sys_format_ok()"
     try:
-        _click_any(page, [
-            'button:has-text("Entrar")', 'input[value*="Entrar"]',
-            'a:has-text("Entrar")', 'text=Entrar',
-            '#sub_form_b', 'a#sub_form_b',
-        ], 'entrar', timeout=5000)
+        page.click('#sub_form_b', timeout=5000)
     except Exception:
-        # Fallback: JS submit + Enter
-        page.evaluate("document.querySelector('a#sub_form_b')?.click() || document.querySelector('form')?.submit()")
-        page.keyboard.press("Enter")
-        log.info("OK submit via JS fallback")
+        # Fallbacks
+        for sel in ['a:has-text("Entrar")', 'input[value*="Entrar"]', 'text=Entrar']:
+            try:
+                page.click(sel, timeout=3000)
+                break
+            except Exception:
+                continue
+        else:
+            page.keyboard.press("Enter")
 
     page.wait_for_load_state("domcontentloaded", timeout=30000)
     page.wait_for_timeout(5000)
 
+    # Verificar se login funcionou
+    still_login = page.evaluate(
+        "() => document.body ? document.body.innerText.includes('Esqueci minha senha') : false"
+    )
+    if still_login:
+        raise RuntimeError(
+            f"{name}: login rejeitado pelo servidor — verificar credenciais"
+        )
+    log.info(f"OK {name}: login aceito -> {page.url[:60]}")
+
     _fechar_modal_novidades(page)
 
-    # Navegação: JS puro cross-frame com dispatchEvent (ScriptCase usa eventos customizados)
-    log.info(f"{name}: navegando para Atendimentos/Planejamento de OS")
-    page.evaluate("""
-        () => {
-            const search = (doc) => {
-                for (const a of doc.querySelectorAll('a')) {
-                    if (a.textContent.includes('Atendimentos') || a.textContent.includes('Planejamento de OS')) {
-                        a.dispatchEvent(new MouseEvent('click', {bubbles: true}));
-                        a.click();
-                        return true;
-                    }
-                }
-                for (const frame of doc.querySelectorAll('iframe, frame')) {
-                    try { if (search(frame.contentDocument)) return true; } catch(e) {}
-                }
-                return false;
-            };
-            return search(document) ? 'clicou' : 'nao achou';
-        }
-    """)
-    page.wait_for_timeout(3000)
+    # ===== STEP 2: MENU hamburger -> Atendimentos/Execução =====
+    log.info(f"{name}: menu hamburger")
+    try:
+        page.click(
+            'xpath=//*[@id="idMenuHeader"]/td/header/div/div[1]/div/div[1]',
+            timeout=5000,
+        )
+    except Exception:
+        page.evaluate("""() => {
+            for (const el of document.querySelectorAll('#idMenuHeader, [class*="toggle"], [class*="menu"]')) {
+                el.click();
+            }
+        }""")
+    page.wait_for_timeout(1500)
 
-    log.info(f"{name}: navegando para Execução")
-    page.evaluate("""
-        () => {
-            const search = (doc) => {
-                for (const a of doc.querySelectorAll('a')) {
-                    if (a.textContent.includes('Execução') || a.textContent.includes('Execucao')) {
-                        a.dispatchEvent(new MouseEvent('click', {bubbles: true}));
-                        a.click();
-                        return true;
-                    }
-                }
-                for (const frame of doc.querySelectorAll('iframe, frame')) {
-                    try { if (search(frame.contentDocument)) return true; } catch(e) {}
-                }
-                return false;
-            };
-            return search(document) ? 'clicou' : 'nao achou';
+    # Clicar "Atendimentos/Execução" (texto exato, não "Atendimentos" + "Execução" separados)
+    menu_result = page.evaluate("""() => {
+        for (const el of document.querySelectorAll('a, [id^="item_"], li, td, div, span')) {
+            const t = (el.textContent || '').trim();
+            if (t === 'Atendimentos/Execução' || t === 'Atendimentos/Execucao') {
+                el.click();
+                el.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+                return t;
+            }
         }
-    """)
+        // Fuzzy: "Execu" + "Atend" e texto curto
+        for (const el of document.querySelectorAll('a, [id^="item_"], li')) {
+            const t = (el.textContent || '').trim();
+            if (t.includes('Execu') && t.includes('Atend') && t.length < 60) {
+                el.click();
+                return 'fuzzy: ' + t;
+            }
+        }
+        return 'NAO ACHOU';
+    }""")
+    if "NAO ACHOU" in menu_result:
+        raise RuntimeError(f"{name}: item de menu 'Atendimentos/Execução' não encontrado")
+    log.info(f"OK {name}: menu '{menu_result}' clicado")
     page.wait_for_timeout(6000)
 
-    # Pesquisar (topo) — tenta também por seletor de atributo SC
-    log.info(f"{name}: clicando Pesquisar")
-    page.evaluate("""
-        () => {
-            const search = (doc) => {
-                let el = doc.querySelector('#pesq_top') || doc.querySelector('a#pesq_top')
-                    || doc.querySelector('[id*=\"pesq\"]') || doc.querySelector('[onclick*=\"pesq\"]');
-                if (el) { el.click(); el.dispatchEvent(new MouseEvent('click', {bubbles: true})); return true; }
-                for (const a of doc.querySelectorAll('a')) {
-                    if (a.textContent.includes('Pesquisar')) { a.click(); return true; }
-                }
-                for (const frame of doc.querySelectorAll('iframe, frame')) {
-                    try { if (search(frame.contentDocument)) return true; } catch(e) {}
-                }
-                return false;
-            };
-            return search(document) ? 'clicou' : 'nao achou';
-        }
-    """)
-    page.wait_for_timeout(3000)
+    # ===== STEP 3: ACHAR FRAME cons_atendimentos =====
+    target = _find_frame(page, "cons_atendimentos")
+    if not target:
+        # Fallback: qualquer frame com "atendimentos" que não seja menu/novidades
+        for f in page.frames:
+            if "atendimentos" in f.url and "app_menu" not in f.url and "novidades" not in f.url:
+                target = f
+                break
+    if not target:
+        raise RuntimeError(f"{name}: frame cons_atendimentos não encontrado após navegação")
+    log.info(f"OK {name}: frame alvo = {target.url[:80]}")
 
-    # Selecionar filtro salvo — busca cross-frame via JS
-    filtro_ok = False
-    value = page.evaluate("""(wanted) => {
-        const search = (doc) => {
-            const sel = doc.querySelector('select#sel_recup_filters_bot') || doc.querySelector('select[name="sel_recup_filters_bot"]');
-            if (sel) {
-                for (const o of sel.options) {
-                    const t = (o.textContent || '').trim();
-                    if (t === wanted || t.includes('DMAIS') || t.includes('dmais')) return o.value;
-                }
-            }
-            for (const frame of doc.querySelectorAll('iframe, frame')) {
-                try { const r = search(frame.contentDocument); if (r) return r; } catch(e) {}
+    # ===== STEP 4: PESQUISAR (abre form de filtro) =====
+    try:
+        target.locator('#pesq_top').click(timeout=10000)
+        log.info(f"OK {name}: #pesq_top clicado")
+    except Exception:
+        target.evaluate("() => { const el = document.querySelector('#pesq_top'); if (el) el.click(); }")
+        log.info(f"OK {name}: #pesq_top clicado via JS")
+    page.wait_for_timeout(4000)
+
+    # ===== STEP 5: SELECIONAR FILTRO =====
+    # O frame pode ter recarregado após pesq_top — re-encontrar
+    target = _find_frame(page, "cons_atendimentos") or target
+
+    filtro_sel = target.locator('select#sel_recup_filters_bot').first
+    if not filtro_sel.count():
+        # Buscar em todos os frames
+        for f in page.frames:
+            loc = f.locator('select#sel_recup_filters_bot').first
+            if loc.count():
+                filtro_sel = loc
+                target = f
+                break
+
+    if not filtro_sel.count():
+        raise RuntimeError(f"{name}: select #sel_recup_filters_bot não encontrado")
+
+    try:
+        filtro_sel.select_option(label=filter_label, timeout=10000)
+        log.info(f"OK {name}: filtro selecionado (label exato)")
+    except Exception:
+        # Fuzzy: buscar option que contém DMAIS ou BACKLOG ou FIELD
+        value = target.evaluate("""() => {
+            const sel = document.querySelector('#sel_recup_filters_bot');
+            if (!sel) return null;
+            for (const o of sel.options) {
+                const t = (o.textContent || '').trim().toUpperCase();
+                if (t.includes('DMAIS') || t.includes('BACKLOG') || t.includes('FIELD'))
+                    return o.value;
             }
             return null;
-        };
-        return search(document);
-    }""", filter_label)
-    if value:
-        # Seleciona o option encontrado
-        for ctx in _contexts(page):
+        }""")
+        if value:
+            filtro_sel.select_option(value=value)
+            log.info(f"OK {name}: filtro selecionado (fuzzy value={value})")
+        else:
+            all_opts = target.evaluate("""() => {
+                const sel = document.querySelector('#sel_recup_filters_bot');
+                return sel ? Array.from(sel.options).map(o => (o.textContent||'').trim()) : [];
+            }""")
+            raise RuntimeError(
+                f"{name}: filtro '{filter_label[:40]}' não encontrado. "
+                f"Options: {all_opts[:10]}"
+            )
+    page.wait_for_timeout(8000)
+
+    # ===== STEP 6: PESQUISAR RODAPÉ =====
+    pesq_ok = False
+    for f in page.frames:
+        try:
+            loc = f.locator('#sc_b_pesq_bot').first
+            if loc.count():
+                loc.click(timeout=10000)
+                log.info(f"OK {name}: #sc_b_pesq_bot clicado")
+                pesq_ok = True
+                break
+        except Exception:
+            continue
+    if not pesq_ok:
+        raise RuntimeError(f"{name}: botão Pesquisar rodapé (#sc_b_pesq_bot) não encontrado")
+    page.wait_for_timeout(10000)
+
+    # ===== STEP 7: EXCEL =====
+    target = _find_frame(page, "cons_atendimentos") or target
+    excel_ok = False
+
+    # Tentativa 1: botão direto #sc_GerarXLS_top
+    try:
+        target.locator('#sc_GerarXLS_top').first.click(timeout=10000)
+        excel_ok = True
+        log.info(f"OK {name}: #sc_GerarXLS_top clicado")
+    except Exception:
+        pass
+
+    # Tentativa 2: grupo de botões -> "Excel"
+    if not excel_ok:
+        try:
+            target.locator('#sc_btgp_btn_group_1_top').click(timeout=5000)
+            page.wait_for_timeout(1000)
+            target.evaluate("""() => {
+                for (const el of document.querySelectorAll('a, button, li')) {
+                    if ((el.textContent || '').includes('Excel')) { el.click(); return; }
+                }
+            }""")
+            excel_ok = True
+            log.info(f"OK {name}: Excel via grupo de botões")
+        except Exception:
+            pass
+
+    # Tentativa 3: procurar "Excel" em todos os frames
+    if not excel_ok:
+        for f in page.frames:
             try:
-                sel = ctx.locator('select#sel_recup_filters_bot, select[name="sel_recup_filters_bot"]').first
-                if sel.count():
-                    sel.select_option(value=value)
-                    log.info(f"OK {name}: filtro DMAIS selecionado por value={value}")
-                    page.wait_for_timeout(6000)
-                    filtro_ok = True
+                found = f.evaluate("""() => {
+                    for (const el of document.querySelectorAll('a, button, li')) {
+                        if ((el.textContent || '').includes('Excel')) { el.click(); return true; }
+                    }
+                    return false;
+                }""")
+                if found:
+                    excel_ok = True
+                    log.info(f"OK {name}: Excel via busca cross-frame")
                     break
             except Exception:
                 continue
-    if not filtro_ok:
-        raise RuntimeError(f"{name}: filtro '{filter_label}' não encontrado")
 
-    # Pesquisar (rodapé) — JS puro
-    log.info(f"{name}: clicando Pesquisar rodapé")
-    page.evaluate("""
-        () => {
-            const ids = ['#sc_b_pesq_bot', 'a#sc_b_pesq_bot', 'button#sc_b_pesq_bot', 'input#sc_b_pesq_bot'];
-            for (const id of ids) {
-                const el = document.querySelector(id);
-                if (el) { el.click(); return 'clicou'; }
-            }
-            for (const a of document.querySelectorAll('a')) {
-                if (a.textContent.includes('Pesquisar')) { a.click(); return 'clicou'; }
-            }
-            return 'nao achou';
-        }
-    """)
-    page.wait_for_timeout(8000)
+    if not excel_ok:
+        raise RuntimeError(f"{name}: botão Excel não encontrado")
 
-    # Grupo botões → Excel — JS puro
-    log.info(f"{name}: clicando grupo botoes")
-    page.evaluate("""
-        () => {
-            const el = document.querySelector('#sc_btgp_btn_group_1_top') || document.querySelector('button#sc_btgp_btn_group_1_top');
-            if (el) { el.click(); return 'clicou'; }
-            return 'nao achou';
-        }
-    """)
-    page.wait_for_timeout(1000)
-
-    log.info(f"{name}: clicando Excel")
-    page.evaluate("""
-        () => {
-            for (const el of document.querySelectorAll('a, button, li')) {
-                if ((el.textContent||'').includes('Excel')) { el.click(); return 'clicou'; }
-            }
-            return 'nao achou';
-        }
-    """)
-    log.info(f"{name}: aguardando geração do XLSX/link Baixar")
-
-    # Polling para o link "Baixar"
+    # ===== STEP 8: AGUARDAR LINK BAIXAR =====
+    log.info(f"{name}: aguardando link Baixar (timeout {timeout_s}s)")
     baixar_loc = None
     for i in range(timeout_s // 5):
         page.wait_for_timeout(5000)
-        for ctx in _contexts(page):
+        for f in page.frames:
             try:
-                loc = ctx.locator('a:has-text("Baixar"), text=Baixar').first
+                loc = f.locator('a:has-text("Baixar")').first
                 if loc.count() and loc.is_visible(timeout=500):
                     baixar_loc = loc
                     break
             except Exception:
                 pass
         if baixar_loc:
-            log.info(f"OK {name}: link Baixar apareceu após {(i+1)*5}s")
+            log.info(f"OK {name}: link Baixar apareceu após {(i + 1) * 5}s")
             break
 
     # Fallback: link .xlsx direto
     if not baixar_loc:
-        for ctx in _contexts(page):
+        for f in page.frames:
             try:
-                loc = ctx.locator('a[href*=".xlsx"]').first
+                loc = f.locator('a[href*=".xlsx"]').first
                 if loc.count() and loc.is_visible(timeout=1000):
                     baixar_loc = loc
                     break
@@ -431,7 +479,7 @@ def baixar_backlog_routerbox(
     if not baixar_loc:
         raise RuntimeError(f"{name}: link Baixar/.xlsx não encontrado após {timeout_s}s")
 
-    # Download
+    # ===== STEP 9: DOWNLOAD =====
     with page.expect_download(timeout=60000) as di:
         baixar_loc.click(timeout=10000)
     download = di.value
