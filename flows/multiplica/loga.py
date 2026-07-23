@@ -30,8 +30,7 @@ class _TableParser(HTMLParser):
         self.rows = []
 
     def handle_starttag(self, tag, attrs):
-        attrs = dict(attrs)
-        if tag == "table" and attrs.get("data-testid") == "indicadores-table":
+        if tag == "table" and not self.in_table and not self.rows:
             self.in_table = True
         elif self.in_table and tag == "tr":
             self.row = []
@@ -53,16 +52,49 @@ class _TableParser(HTMLParser):
             self.in_table = False
 
 
+def _canonical_indicator_row(values: list[str]) -> list[str] | None:
+    if tuple(value.casefold() for value in values) != tuple(
+        value.casefold() for value in EXPECTED_INDICATORS
+    ):
+        return None
+    return list(EXPECTED_INDICATORS)
+
+
 def _validate_rows(rows: list[list[str]]) -> str:
-    if not rows or tuple(rows[0][1:]) != EXPECTED_INDICATORS:
+    if not rows or not rows[0] or rows[0][0].casefold() != "cidade":
         raise ValueError("TABLE_CONTRACT_INVALID")
-    labels = {row[0] for row in rows[1:] if row}
+
+    simple_header = _canonical_indicator_row(rows[0][1:])
+    if simple_header:
+        normalized_rows = [["Cidade", *simple_header], *rows[1:]]
+        data_rows = rows[1:]
+        expected_columns = len(EXPECTED_INDICATORS) + 1
+    elif len(rows) > 1:
+        grouped_header = tuple(cell.casefold() for cell in rows[0])
+        indicator_header = _canonical_indicator_row(rows[1])
+        if grouped_header != (
+            "cidade",
+            "sla",
+            "qualidade",
+            "consolidado",
+        ) or not indicator_header:
+            raise ValueError("TABLE_CONTRACT_INVALID")
+        normalized_rows = [
+            ["Cidade", "SLA", "Qualidade", "Consolidado"],
+            indicator_header,
+            *rows[2:],
+        ]
+        data_rows = rows[2:]
+        expected_columns = len(EXPECTED_INDICATORS) + 2
+    else:
+        raise ValueError("TABLE_CONTRACT_INVALID")
+
+    labels = {row[0] for row in data_rows if row}
     if not EXPECTED_ROWS.issubset(labels):
         raise ValueError("TABLE_CONTRACT_INVALID")
-    expected_columns = len(EXPECTED_INDICATORS) + 1
-    if any(len(row) != expected_columns for row in rows):
+    if any(len(row) != expected_columns for row in data_rows):
         raise ValueError("TABLE_CONTRACT_INVALID")
-    return "\n".join("\t".join(row) for row in rows) + "\n"
+    return "\n".join("\t".join(row) for row in normalized_rows) + "\n"
 
 
 def parse_indicators_html(html: str) -> str:
@@ -75,9 +107,28 @@ def _selected_text(control) -> str:
     return control.locator("option:checked").inner_text().strip()
 
 
+def _is_authenticated_indicators_page(page) -> bool:
+    return (
+        page.title().strip() == "Indicadores SLA e Qualidade"
+        and page.locator('input[type="password"]').count() == 0
+    )
+
+
+def _filter_controls(page):
+    return (
+        {
+            "sistema": page.locator("#sistema"),
+            "executor": page.locator("#executor"),
+            "modo_calculo": page.locator("#modelo"),
+        },
+        page.locator("#dti"),
+        page.locator("#dtf"),
+    )
+
+
 def _summary_from_page(page) -> str:
     rows = []
-    table_rows = page.locator('[data-testid="indicadores-table"] tr')
+    table_rows = page.locator("table tr")
     for index in range(table_rows.count()):
         rows.append(
             [
@@ -89,21 +140,14 @@ def _summary_from_page(page) -> str:
 
 
 def collect_window(page, window: CycleWindow, settings) -> Path:
-    page.goto(settings.loga_url, wait_until="domcontentloaded")
-    if page.locator('[data-testid="indicadores-page"]').count() != 1:
+    page.goto(settings.loga_url, wait_until="networkidle")
+    if not _is_authenticated_indicators_page(page):
         raise CollectionError("AUTH_EXPIRED")
 
-    controls = {
-        "sistema": page.get_by_label(re.compile("^Sistema$", re.I)),
-        "executor": page.get_by_label(re.compile("^Executor$", re.I)),
-        "modo_calculo": page.get_by_label(
-            re.compile("^Modo de Cálculo$", re.I)
-        ),
-    }
+    page.get_by_role("button", name="Filtros", exact=True).click()
+    controls, start_control, end_control = _filter_controls(page)
     for key, expected in FILTERS.items():
         controls[key].select_option(label=expected)
-    start_control = page.get_by_label(re.compile("^Data Início$", re.I))
-    end_control = page.get_by_label(re.compile("^Data Fim$", re.I))
     start_control.fill(window.query_start.isoformat())
     end_control.fill(window.query_end.isoformat())
     page.get_by_role(
@@ -117,6 +161,7 @@ def collect_window(page, window: CycleWindow, settings) -> Path:
         or end_control.input_value() != window.query_end.isoformat()
     ):
         raise CollectionError("FILTER_MISMATCH")
+    page.locator("table tr").nth(1).wait_for()
     summary = _summary_from_page(page)
 
     with page.expect_download() as download_info:

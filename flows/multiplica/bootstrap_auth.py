@@ -5,6 +5,13 @@ from playwright.sync_api import sync_playwright
 from .config import Settings
 
 
+def _is_authenticated_indicators_page(page) -> bool:
+    return (
+        page.title().strip() == "Indicadores SLA e Qualidade"
+        and page.locator('input[type="password"]').count() == 0
+    )
+
+
 def main():
     settings = Settings.from_mapping(os.environ)
     with sync_playwright() as playwright:
@@ -13,7 +20,7 @@ def main():
         page = context.new_page()
         page.goto(settings.loga_url)
         input("Conclua o login da Loga e pressione Enter para validar: ")
-        if page.locator('[data-testid="indicadores-page"]').count() != 1:
+        if not _is_authenticated_indicators_page(page):
             context.close()
             browser.close()
             raise RuntimeError("AUTH_MARKER_NOT_FOUND")
