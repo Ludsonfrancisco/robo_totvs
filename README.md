@@ -13,6 +13,7 @@ Spec completa: ver [`PRD.md`](./PRD.md). Roteiro de desenvolvimento: ver [`TASKS
 | **CLI** (dev/debug) | `python main.py` no terminal | flags livres: `--limite`, `--reset`, `--retry-falhos`, `--incluir-desligados` |
 | **Worker scheduler** (produção) | `python worker.py` (em loop) | dispara automaticamente em `ROBOT_SCHEDULE_HOUR:MINUTE` (default 06:00) |
 | **Worker signal-driven** (produção) | Portal D+ cria `run.signal` no volume | worker detecta em ≤5s e roda `main.main(["--retry-falhos"])` |
+| **Multiplica manual** | criar `multiplica/multiplica.signal` no volume | coleta o pacote Loga sem habilitar a agenda |
 
 No modo worker, o robô NÃO termina entre execuções — fica em loop dormindo até a próxima hora-alvo ou até detectar `run.signal`.
 
@@ -84,6 +85,9 @@ O `worker.py` é o `CMD` default do Dockerfile. Configurável via envs:
 | `ROBOT_RUN_ON_START` | `false` | `true` força run imediato ao subir o container |
 | `ROBOT_INCLUDE_DISMISSED` | `false` | `true` adiciona `--incluir-desligados` ao run agendado |
 | `WORKER_POLL_INTERVAL` | `5` | Segundos do loop de detecção de `run.signal` |
+| `MULTIPLICA_SCHEDULE_ENABLED` | `false` | Habilita a agenda diária do Multiplica; permanece desligada inicialmente |
+| `MULTIPLICA_SCHEDULE_HOUR` | `23` | Hora futura da coleta diária |
+| `MULTIPLICA_SCHEDULE_MINUTE` | `50` | Minuto futuro da coleta diária |
 
 ### Contrato de arquivos no volume compartilhado
 
@@ -94,8 +98,15 @@ DATA_PIPELINE_DIR/
 ├── run.signal     # Portal D+ CRIA → worker CONSOME    (pedido de retry)
 ├── run.log        # worker ESCREVE                      (sink loguru ao vivo)
 ├── run.done       # worker CRIA ao final                (JSON com resultado)
-└── signal.ready   # worker CRIA se ok > 0               (flag de pendência)
+├── signal.ready   # worker CRIA se ok > 0               (flag de pendência)
+└── multiplica/
+    ├── multiplica.signal     # acionamento manual; worker consome
+    └── run_multiplica.done   # resultado sanitizado da coleta
 ```
+
+O sinal manual do Multiplica é aceito mesmo com
+`MULTIPLICA_SCHEDULE_ENABLED=false`. A agenda de 23h50 só entra no
+supervisor quando essa variável for explicitamente habilitada.
 
 `run.done` payload:
 

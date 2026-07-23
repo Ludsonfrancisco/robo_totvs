@@ -70,6 +70,15 @@ PROTHEUS_ENABLED = os.environ.get("PROTHEUS_ENABLED", "false").lower() in (
     "true",
     "yes",
 )
+MULTIPLICA_SCHEDULE_ENABLED = os.environ.get(
+    "MULTIPLICA_SCHEDULE_ENABLED", "false"
+).lower() in ("1", "true", "yes")
+MULTIPLICA_SCHEDULE_HOUR = int(
+    os.environ.get("MULTIPLICA_SCHEDULE_HOUR", "23")
+)
+MULTIPLICA_SCHEDULE_MINUTE = int(
+    os.environ.get("MULTIPLICA_SCHEDULE_MINUTE", "50")
+)
 
 # RouterBox Backlog hourly scheduler
 ROUTERBOX_ENABLED = os.environ.get("ROUTERBOX_HOURLY_ENABLED", "true").lower() in ("1", "true", "yes")
@@ -82,6 +91,9 @@ SIGNAL_FILE = DATA_PIPELINE_DIR / "run.signal"
 LOG_FILE = DATA_PIPELINE_DIR / "run.log"
 DONE_FILE = DATA_PIPELINE_DIR / "run.done"
 READY_FILE = DATA_PIPELINE_DIR / "signal.ready"
+MULTIPLICA_SIGNAL_FILE = (
+    DATA_PIPELINE_DIR / "multiplica" / "multiplica.signal"
+)
 
 # RouterBox Backlog artifacts
 ROUTERBOX_DIR = Path(os.environ.get("ROUTERBOX_OUTPUT_DIR", "/app/data_pipeline/routerbox_backlog"))
@@ -105,6 +117,31 @@ def _next_run_at(now: datetime | None = None) -> datetime:
     if candidate <= now:
         candidate += timedelta(days=1)
     return candidate
+
+
+def _next_multiplica_run_at(now: datetime | None = None) -> datetime:
+    now = now or datetime.now()
+    candidate = now.replace(
+        hour=MULTIPLICA_SCHEDULE_HOUR,
+        minute=MULTIPLICA_SCHEDULE_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+    if candidate <= now:
+        candidate += timedelta(days=1)
+    return candidate
+
+
+def _run_multiplica_signal_if_present() -> bool:
+    if not MULTIPLICA_SIGNAL_FILE.exists():
+        return False
+
+    MULTIPLICA_SIGNAL_FILE.unlink(missing_ok=True)
+    logger.info("Signal Multiplica detectado. Executando coleta manual.")
+    from flows.multiplica.runner import run_once
+
+    run_once()
+    return True
 
 
 def _consume_signal() -> dict | None:
@@ -462,6 +499,8 @@ def _scheduled_events(now: datetime | None = None) -> list[tuple[str, datetime]]
         events.append(("protheus", _next_run_at(now)))
     if ROUTERBOX_ENABLED:
         events.append(("routerbox", _next_routerbox_run_at(now)))
+    if MULTIPLICA_SCHEDULE_ENABLED:
+        events.append(("multiplica", _next_multiplica_run_at(now)))
     return sorted(events, key=lambda event: event[1])
 
 
@@ -480,6 +519,11 @@ def loop_forever() -> None:
         f"RouterBox backlog: enabled={ROUTERBOX_ENABLED} "
         f"interval={ROUTERBOX_INTERVAL_MIN}min "
         f"on_start={ROUTERBOX_ON_START} dir={ROUTERBOX_DIR}"
+    )
+    logger.info(
+        f"Multiplica: scheduled={MULTIPLICA_SCHEDULE_ENABLED} "
+        f"time={MULTIPLICA_SCHEDULE_HOUR:02d}:{MULTIPLICA_SCHEDULE_MINUTE:02d} "
+        f"signal={MULTIPLICA_SIGNAL_FILE}"
     )
 
     if PROTHEUS_ENABLED and RUN_ON_START:
@@ -500,6 +544,9 @@ def loop_forever() -> None:
 
     while True:
         try:
+            if _run_multiplica_signal_if_present():
+                continue
+
             # Determinar qual scheduler dispara primeiro
             events = _scheduled_events()
 
@@ -519,6 +566,9 @@ def loop_forever() -> None:
             )
 
             while remaining > 0:
+                if _run_multiplica_signal_if_present():
+                    break
+
                 # Checar signal do Protheus
                 if PROTHEUS_ENABLED and SIGNAL_FILE.exists():
                     payload = _consume_signal() or {}
@@ -545,6 +595,10 @@ def loop_forever() -> None:
                     _run_with_auto_retry(mode="scheduled")
                 elif next_name == "routerbox":
                     _run_routerbox_backlog()
+                elif next_name == "multiplica":
+                    from flows.multiplica.runner import run_once
+
+                    run_once()
 
         except KeyboardInterrupt:
             logger.info("KeyboardInterrupt recebido. Encerrando.")
