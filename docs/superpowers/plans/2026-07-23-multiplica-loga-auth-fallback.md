@@ -275,7 +275,7 @@ Expected: `git diff --check` sem saída e nenhum diff RouterBox.
 - Consumes: imagem do commit da Task 2 e segredos inseridos pelo usuário no EasyPanel.
 - Produces: serviço `apps_dmais_automacoes` em `1/1` e `run_multiplica.done` sanitizado.
 
-- [ ] **Step 1: Push da branch**
+- [x] **Step 1: Push da branch**
 
 ```powershell
 git push origin codex/dmais-automacoes
@@ -283,7 +283,7 @@ git push origin codex/dmais-automacoes
 
 Expected: `origin/codex/dmais-automacoes` no SHA da Task 2.
 
-- [ ] **Step 2: Configurar segredos no EasyPanel**
+- [x] **Step 2: Configurar segredos no EasyPanel**
 
 Adicionar somente pelo formulário de ambiente do serviço:
 
@@ -294,7 +294,7 @@ MULTIPLICA_LOGA_PASSWORD=<valor informado pelo usuário>
 
 Não exibir os valores em terminal, logs, capturas ou documentação.
 
-- [ ] **Step 3: Implantar e preservar flags**
+- [x] **Step 3: Implantar e preservar flags**
 
 Confirmar após a implantação:
 
@@ -307,7 +307,7 @@ MULTIPLICA_SCHEDULE_ENABLED=false
 Fixar a imagem no SHA implantado e manter a revisão anterior disponível para
 rollback.
 
-- [ ] **Step 4: Disparar uma execução manual**
+- [x] **Step 4: Disparar uma execução manual**
 
 No container ativo:
 
@@ -318,7 +318,7 @@ touch /app/data_pipeline/multiplica/multiplica.signal
 Expected: novo `run_multiplica.done` com `success=true`, `error_code=""` e ao
 menos um `bundle_id`.
 
-- [ ] **Step 5: Registrar evidência sanitizada**
+- [x] **Step 5: Registrar evidência sanitizada**
 
 Criar o arquivo de evidência contendo somente:
 
@@ -332,7 +332,7 @@ Criar o arquivo de evidência contendo somente:
 - confirmação de que RouterBox permaneceu inalterado
 ```
 
-- [ ] **Step 6: Commit e push da evidência**
+- [x] **Step 6: Commit e push da evidência**
 
 ```powershell
 git add docs/superpowers/evidence/2026-07-23-multiplica-loga-auth-fallback.md
