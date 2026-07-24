@@ -31,9 +31,20 @@ class _Page:
         return _Locator(0)
 
 
+class _LoginPage(_Page):
+    def title(self):
+        return "Dashboard - Loga Internet"
+
+    def locator(self, selector):
+        if selector == 'input[type="password"]':
+            return _Locator(1)
+        return _Locator(0)
+
+
 class _Context:
     def __init__(self):
         self.page = _Page()
+        self.pages = [self.page]
         self.saved_path = None
 
     def new_page(self):
@@ -82,6 +93,17 @@ class _PlaywrightManager:
 
 
 class MultiplicaBootstrapAuthTests(unittest.TestCase):
+    def test_finds_authenticated_page_opened_after_login(self):
+        context = _Context()
+        authenticated_page = _Page()
+        context.page = _LoginPage()
+        context.pages = [context.page, authenticated_page]
+
+        self.assertIs(
+            bootstrap_auth._find_authenticated_page(context),
+            authenticated_page,
+        )
+
     def test_accepts_real_authenticated_indicators_page(self):
         context = _Context()
         browser = _Browser(context)

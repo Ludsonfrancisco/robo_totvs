@@ -12,6 +12,13 @@ def _is_authenticated_indicators_page(page) -> bool:
     )
 
 
+def _find_authenticated_page(context):
+    for page in reversed(context.pages):
+        if _is_authenticated_indicators_page(page):
+            return page
+    return None
+
+
 def main():
     settings = Settings.from_mapping(os.environ)
     with sync_playwright() as playwright:
@@ -20,7 +27,7 @@ def main():
         page = context.new_page()
         page.goto(settings.loga_url)
         input("Conclua o login da Loga e pressione Enter para validar: ")
-        if not _is_authenticated_indicators_page(page):
+        if _find_authenticated_page(context) is None:
             context.close()
             browser.close()
             raise RuntimeError("AUTH_MARKER_NOT_FOUND")
