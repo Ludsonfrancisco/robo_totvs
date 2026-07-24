@@ -11,6 +11,52 @@ FIXTURE = (
 
 
 class LogaContractTests(unittest.TestCase):
+    def test_extracts_all_municipal_tooltip_bases(self):
+        titles = [
+            "No Prazo: 7   Total Produtivos: 9"
+            for _ in EXPECTED_INDICATORS
+        ]
+        rows = [
+            {
+                "cells": ["Aracruz", *(["77.78"] * 16), "93.75"],
+                "titles": [None, *titles, None],
+            },
+            {
+                "cells": ["Total", *(["88.18"] * 16), "62.50"],
+                "titles": [None] * 18,
+            },
+        ]
+
+        bases = loga.tooltip_bases_from_rows(rows)
+
+        lines = bases.splitlines()
+        self.assertEqual(
+            lines[0],
+            "Cidade\tIndicador\tNumerador\tDenominador\t"
+            "Rótulo numerador\tRótulo denominador",
+        )
+        self.assertEqual(len(lines), 17)
+        self.assertEqual(
+            lines[1],
+            "Aracruz\tIIP\t7\t9\tNo Prazo\tTotal Produtivos",
+        )
+
+    def test_rejects_missing_municipal_tooltip(self):
+        rows = [
+            {
+                "cells": ["Aracruz", *(["100.00"] * 16), "100.00"],
+                "titles": [
+                    None,
+                    *(["No Prazo: 0   Total Produtivos: 0"] * 15),
+                    None,
+                    None,
+                ],
+            },
+        ]
+
+        with self.assertRaisesRegex(ValueError, "TOOLTIP_CONTRACT_INVALID"):
+            loga.tooltip_bases_from_rows(rows)
+
     def test_waits_for_export_button_after_search(self):
         class ExportButton:
             def __init__(self):

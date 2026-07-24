@@ -12,6 +12,13 @@ EXPECTED_INDICATORS = (
     "IIP", "IIPP", "IMEP", "IMEPP", "ISP", "ICP", "IRP", "IRPP",
     "IRR", "IQA", "IQIv", "IQRv", "RTV", "RST", "ICT", "ICC",
 )
+TOOLTIP_HEADER = (
+    "Cidade\tIndicador\tNumerador\tDenominador\t"
+    "Rótulo numerador\tRótulo denominador"
+)
+TOOLTIP_PATTERN = re.compile(
+    r"^\s*(.+?):\s*(\d+)\s{2,}(.+?):\s*(\d+)\s*$"
+)
 
 
 class CollectionError(RuntimeError):
@@ -147,6 +154,68 @@ def _summary_from_page(page) -> str:
     return _validate_rows(rows)
 
 
+def tooltip_bases_from_rows(rows: list[dict]) -> str:
+    output = [TOOLTIP_HEADER]
+    city_count = 0
+    for row in rows:
+        cells = row["cells"]
+        titles = row["titles"]
+        if len(cells) != 18 or cells[0] in EXPECTED_ROWS:
+            continue
+        city = cells[0].strip()
+        if not city:
+            continue
+        if len(titles) != len(cells):
+            raise ValueError("TOOLTIP_CONTRACT_INVALID")
+        city_count += 1
+        for index, indicator in enumerate(EXPECTED_INDICATORS, start=1):
+            match = TOOLTIP_PATTERN.fullmatch(
+                str(titles[index] or "").replace("\u00a0", " ")
+            )
+            if not match:
+                raise ValueError("TOOLTIP_CONTRACT_INVALID")
+            numerator_label, numerator, denominator_label, denominator = (
+                match.groups()
+            )
+            labels = [
+                " ".join(label.replace("\t", " ").split())
+                for label in (numerator_label, denominator_label)
+            ]
+            output.append(
+                "\t".join(
+                    (
+                        city,
+                        indicator,
+                        numerator,
+                        denominator,
+                        *labels,
+                    )
+                )
+            )
+    if not city_count:
+        raise ValueError("TOOLTIP_CONTRACT_INVALID")
+    return "\n".join(output) + "\n"
+
+
+def _tooltip_bases_from_page(page) -> str:
+    rows = []
+    table_rows = page.locator("table tr")
+    for index in range(table_rows.count()):
+        cells = table_rows.nth(index).locator("th, td")
+        rows.append(
+            {
+                "cells": [
+                    value.strip() for value in cells.all_inner_texts()
+                ],
+                "titles": [
+                    cells.nth(cell_index).get_attribute("title")
+                    for cell_index in range(cells.count())
+                ],
+            }
+        )
+    return tooltip_bases_from_rows(rows)
+
+
 def _wait_for_export_button(page):
     export_button = page.get_by_role(
         "button",
@@ -181,6 +250,7 @@ def collect_window(page, window: CycleWindow, settings) -> Path:
     page.locator("table tr").nth(1).wait_for()
     export_button = _wait_for_export_button(page)
     summary = _summary_from_page(page)
+    tooltip_bases = _tooltip_bases_from_page(page)
 
     with page.expect_download(timeout=60_000) as download_info:
         export_button.click()
@@ -193,6 +263,7 @@ def collect_window(page, window: CycleWindow, settings) -> Path:
         runtime_root=settings.runtime_root,
         window=window,
         summary_text=summary,
+        tooltip_bases_text=tooltip_bases,
         workbook_bytes=workbook,
         captured_at=datetime.now().astimezone(),
     )

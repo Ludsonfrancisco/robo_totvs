@@ -35,6 +35,7 @@ def build_bundle(
     runtime_root: Path,
     window: CycleWindow,
     summary_text: str,
+    tooltip_bases_text: str,
     workbook_bytes: bytes,
     captured_at: datetime,
     before_publish: Callable[[], None] | None = None,
@@ -48,13 +49,16 @@ def build_bundle(
     temp_dir.mkdir()
 
     summary_bytes = summary_text.encode("utf-8")
+    tooltip_bases_bytes = tooltip_bases_text.encode("utf-8")
     summary_name = "summary.tsv"
+    tooltip_bases_name = "tooltip_bases.tsv"
     workbook_name = "atendimentos_indicadores.xlsx"
     (temp_dir / summary_name).write_bytes(summary_bytes)
+    (temp_dir / tooltip_bases_name).write_bytes(tooltip_bases_bytes)
     (temp_dir / workbook_name).write_bytes(workbook_bytes)
 
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "source": "LOGA",
         "cycle_start": window.cycle_start.isoformat(),
         "cycle_close": window.cycle_close.isoformat(),
@@ -64,6 +68,8 @@ def build_bundle(
         "filters": FILTERS,
         "summary_file": summary_name,
         "summary_sha256": _digest(summary_bytes),
+        "tooltip_bases_file": tooltip_bases_name,
+        "tooltip_bases_sha256": _digest(tooltip_bases_bytes),
         "workbook_file": workbook_name,
         "workbook_sha256": _digest(workbook_bytes),
     }

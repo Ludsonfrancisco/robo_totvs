@@ -26,6 +26,11 @@ class BundleTests(unittest.TestCase):
             runtime_root=self.root,
             window=self.window,
             summary_text="Cidade\tIIP\nTotal\t100\n",
+            tooltip_bases_text=(
+                "Cidade\tIndicador\tNumerador\tDenominador\t"
+                "Rótulo numerador\tRótulo denominador\n"
+                "Aracruz\tIIP\t1\t1\tNo Prazo\tTotal Produtivos\n"
+            ),
             workbook_bytes=b"xlsx-sintetico",
             captured_at=datetime(
                 2026, 7, 23, 23, 50, tzinfo=timezone.utc
@@ -35,11 +40,15 @@ class BundleTests(unittest.TestCase):
         manifest = json.loads(
             (bundle_dir / "manifest.json").read_text(encoding="utf-8")
         )
-        self.assertEqual(manifest["schema_version"], 1)
+        self.assertEqual(manifest["schema_version"], 2)
         self.assertEqual(manifest["filters"]["executor"], "Dmais")
         self.assertEqual(len(manifest["summary_sha256"]), 64)
+        self.assertEqual(len(manifest["tooltip_bases_sha256"]), 64)
         self.assertEqual(len(manifest["workbook_sha256"]), 64)
         self.assertTrue((bundle_dir / manifest["summary_file"]).is_file())
+        self.assertTrue(
+            (bundle_dir / manifest["tooltip_bases_file"]).is_file()
+        )
         self.assertTrue((bundle_dir / manifest["workbook_file"]).is_file())
 
     def test_interruption_before_replace_keeps_inbox_empty(self):
@@ -51,6 +60,7 @@ class BundleTests(unittest.TestCase):
                 runtime_root=self.root,
                 window=self.window,
                 summary_text="resumo",
+                tooltip_bases_text="bases",
                 workbook_bytes=b"xlsx",
                 captured_at=datetime.now(timezone.utc),
                 before_publish=interrupt,
