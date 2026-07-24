@@ -11,6 +11,33 @@ FIXTURE = (
 
 
 class LogaContractTests(unittest.TestCase):
+    def test_waits_for_export_button_after_search(self):
+        class ExportButton:
+            def __init__(self):
+                self.wait_options = None
+
+            def wait_for(self, **kwargs):
+                self.wait_options = kwargs
+
+        class Page:
+            def __init__(self):
+                self.button = ExportButton()
+
+            def get_by_role(self, role, **kwargs):
+                self.role = role
+                self.kwargs = kwargs
+                return self.button
+
+        page = Page()
+        button = loga._wait_for_export_button(page)
+
+        self.assertIs(button, page.button)
+        self.assertEqual(page.role, "button")
+        self.assertEqual(page.button.wait_options, {
+            "state": "visible",
+            "timeout": 60_000,
+        })
+
     def test_accepts_real_authenticated_page_contract(self):
         class PasswordLocator:
             def count(self):

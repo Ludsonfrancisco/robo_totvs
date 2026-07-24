@@ -147,6 +147,15 @@ def _summary_from_page(page) -> str:
     return _validate_rows(rows)
 
 
+def _wait_for_export_button(page):
+    export_button = page.get_by_role(
+        "button",
+        name=re.compile("Excel|Baixar|Exportar", re.I),
+    )
+    export_button.wait_for(state="visible", timeout=60_000)
+    return export_button
+
+
 def collect_window(page, window: CycleWindow, settings) -> Path:
     page.goto(settings.loga_url, wait_until="networkidle")
     if not _is_authenticated_indicators_page(page):
@@ -170,12 +179,11 @@ def collect_window(page, window: CycleWindow, settings) -> Path:
     ):
         raise CollectionError("FILTER_MISMATCH")
     page.locator("table tr").nth(1).wait_for()
+    export_button = _wait_for_export_button(page)
     summary = _summary_from_page(page)
 
-    with page.expect_download() as download_info:
-        page.get_by_role(
-            "button", name=re.compile("Excel|Baixar|Exportar", re.I)
-        ).click()
+    with page.expect_download(timeout=60_000) as download_info:
+        export_button.click()
     download = download_info.value
     download_path = download.path()
     if not download_path:
