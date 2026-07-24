@@ -15,9 +15,9 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    PROTHEUS_URL: str
-    PROTHEUS_USER: str
-    PROTHEUS_PASS: str
+    PROTHEUS_URL: str = ""
+    PROTHEUS_USER: str = ""
+    PROTHEUS_PASS: str = ""
 
     HEADLESS: bool = False
     VIEWPORT_W: int = 1366

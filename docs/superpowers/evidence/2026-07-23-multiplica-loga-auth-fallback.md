@@ -1,0 +1,22 @@
+# Evidência — fallback de autenticação Loga
+
+- Serviço: `apps_dmais_automacoes`
+- Branch: `codex/dmais-automacoes`
+- SHA implantado: `0fa1305e9907a773deb5470013116e0ea3ce9053`
+- Execução iniciada: `2026-07-23T22:49:27.237450-03:00`
+- Execução finalizada: `2026-07-23T22:50:32.749989-03:00`
+- Resultado: `success=true`
+- Código de erro: vazio
+- Bundles gerados: 1
+- Ciclo coletado: `2026-07-11`
+- Bundle: `251d2aabc7934f9bc713c22eb4848a2fffe2958c0ed9c9d2316bd67f55692468`
+- Consulta: `2026-07-11` a `2026-07-23`
+- Arquivos: `summary.tsv`, `atendimentos_indicadores.xlsx` e `manifest.json`
+- Hashes dos arquivos conferidos contra o manifesto.
+- `PROTHEUS_ENABLED=false`
+- `ROUTERBOX_HOURLY_ENABLED=true`
+- `MULTIPLICA_SCHEDULE_ENABLED=false`
+- Estado de autenticação: modo `600`, proprietário `root:root`, 928 bytes; conteúdo não inspecionado nem registrado.
+- Os segredos permaneceram exclusivamente nas variáveis de ambiente do EasyPanel e seus valores não foram registrados.
+- O RouterBox permaneceu habilitado e seu código, configuração, arquivos e agenda não foram alterados.
+- O bundle permaneceu no `inbox`; esta validação não publicou dados.
