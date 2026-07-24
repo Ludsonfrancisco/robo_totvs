@@ -67,6 +67,11 @@ class LogaContractTests(unittest.TestCase):
                 {line.split("\t", 1)[0] for line in summary.splitlines()}
             )
         )
+        peso = next(
+            line for line in lines if line.split("\t", 1)[0] == "PESO"
+        )
+        self.assertEqual(len(peso.split("\t")), 18)
+        self.assertTrue(peso.endswith("\t"))
 
     def test_rejects_missing_meta(self):
         html = FIXTURE.replace("<td>META</td>", "<td>ALVO</td>")

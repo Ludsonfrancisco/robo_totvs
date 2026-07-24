@@ -79,13 +79,21 @@ def _validate_rows(rows: list[list[str]]) -> str:
             "consolidado",
         ) or not indicator_header:
             raise ValueError("TABLE_CONTRACT_INVALID")
+        expected_columns = len(EXPECTED_INDICATORS) + 2
+        data_rows = []
+        for row in rows[2:]:
+            if (
+                row
+                and row[0] in {"PESO", "PESO ATINGIDO"}
+                and len(row) == expected_columns - 1
+            ):
+                row = [*row, ""]
+            data_rows.append(row)
         normalized_rows = [
             ["Cidade", "SLA", "Qualidade", "Consolidado"],
             indicator_header,
-            *rows[2:],
+            *data_rows,
         ]
-        data_rows = rows[2:]
-        expected_columns = len(EXPECTED_INDICATORS) + 2
     else:
         raise ValueError("TABLE_CONTRACT_INVALID")
 
