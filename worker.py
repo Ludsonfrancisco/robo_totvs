@@ -54,12 +54,14 @@ import time
 import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from loguru import logger
 
 from flows.common.locks import LockUnavailable, file_lock
+from flows.financeiro_medicao import schedule as financeiro_schedule
 
 DATA_PIPELINE_DIR = Path(os.environ.get("DATA_PIPELINE_DIR", "/app/data_pipeline"))
 GLOBAL_CHROMIUM_LOCK = DATA_PIPELINE_DIR / "runtime" / "chromium.lock"
@@ -89,16 +91,21 @@ FINANCEIRO_MEDICAO_TIMEZONE = os.environ.get(
     "FINANCEIRO_MEDICAO_TIMEZONE",
     "America/Sao_Paulo",
 )
-LOCAL_TIMEZONE = ZoneInfo(FINANCEIRO_MEDICAO_TIMEZONE)
 FINANCEIRO_MEDICAO_SCHEDULE_ENABLED = os.environ.get(
     "FINANCEIRO_MEDICAO_SCHEDULE_ENABLED",
     "false",
 ).lower() in ("1", "true", "yes")
-FINANCEIRO_MEDICAO_SCHEDULE_HOUR = int(
-    os.environ.get("FINANCEIRO_MEDICAO_SCHEDULE_HOUR", "0")
+FINANCEIRO_MEDICAO_SCHEDULE_HOUR = os.environ.get(
+    "FINANCEIRO_MEDICAO_SCHEDULE_HOUR",
+    "0",
 )
-FINANCEIRO_MEDICAO_SCHEDULE_MINUTE = int(
-    os.environ.get("FINANCEIRO_MEDICAO_SCHEDULE_MINUTE", "1")
+FINANCEIRO_MEDICAO_SCHEDULE_MINUTE = os.environ.get(
+    "FINANCEIRO_MEDICAO_SCHEDULE_MINUTE",
+    "1",
+)
+FINANCEIRO_MEDICAO_RUNTIME_ROOT = os.environ.get(
+    "FINANCEIRO_MEDICAO_RUNTIME_ROOT",
+    "/app/data_pipeline/financeiro_medicao",
 )
 
 # RouterBox Backlog hourly scheduler
@@ -135,10 +142,66 @@ def _ensure_dirs() -> None:
 
 def _local_now(now: datetime | None = None) -> datetime:
     if now is None:
-        return datetime.now(LOCAL_TIMEZONE)
-    if now.tzinfo is None:
-        return now
-    return now.astimezone(LOCAL_TIMEZONE)
+        return datetime.now().astimezone()
+    return now
+
+
+def _bounded_worker_int(
+    value,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    if isinstance(value, bool):
+        raise ValueError("invalid integer")
+    parsed = int(value)
+    if not minimum <= parsed <= maximum:
+        raise ValueError("integer outside bounds")
+    return parsed
+
+
+def _financeiro_schedule_settings(
+    *,
+    require_enabled: bool = True,
+):
+    if require_enabled and not FINANCEIRO_MEDICAO_SCHEDULE_ENABLED:
+        return None
+    try:
+        timezone_name = str(FINANCEIRO_MEDICAO_TIMEZONE).strip()
+        ZoneInfo(timezone_name)
+        schedule_hour = _bounded_worker_int(
+            FINANCEIRO_MEDICAO_SCHEDULE_HOUR,
+            minimum=0,
+            maximum=23,
+        )
+        schedule_minute = _bounded_worker_int(
+            FINANCEIRO_MEDICAO_SCHEDULE_MINUTE,
+            minimum=0,
+            maximum=59,
+        )
+        runtime_root = Path(FINANCEIRO_MEDICAO_RUNTIME_ROOT)
+        raw_runtime_root = str(FINANCEIRO_MEDICAO_RUNTIME_ROOT)
+        if (
+            not (
+                runtime_root.is_absolute()
+                or raw_runtime_root.startswith(("/", "\\"))
+            )
+            or runtime_root.name != "financeiro_medicao"
+        ):
+            raise ValueError("invalid runtime root")
+    except Exception:
+        logger.error(
+            "[financeiro_medicao] Agenda desabilitada; "
+            "error_code=CONFIG_INVALID."
+        )
+        return None
+    return SimpleNamespace(
+        runtime_root=runtime_root,
+        schedule_enabled=True,
+        schedule_hour=schedule_hour,
+        schedule_minute=schedule_minute,
+        timezone=timezone_name,
+    )
 
 
 def _next_run_at(now: datetime | None = None) -> datetime:
@@ -165,14 +228,24 @@ def _next_multiplica_run_at(now: datetime | None = None) -> datetime:
 def _next_financeiro_medicao_run_at(
     now: datetime | None = None,
 ) -> datetime:
-    now = _local_now(now)
-    candidate = now.replace(
-        hour=FINANCEIRO_MEDICAO_SCHEDULE_HOUR,
-        minute=FINANCEIRO_MEDICAO_SCHEDULE_MINUTE,
+    settings = _financeiro_schedule_settings(
+        require_enabled=False,
+    )
+    if settings is None:
+        raise ValueError("Invalid financeiro schedule.")
+    if now is None:
+        local_now = datetime.now(ZoneInfo(settings.timezone))
+    elif now.tzinfo is None:
+        local_now = now
+    else:
+        local_now = now.astimezone(ZoneInfo(settings.timezone))
+    candidate = local_now.replace(
+        hour=settings.schedule_hour,
+        minute=settings.schedule_minute,
         second=0,
         microsecond=0,
     )
-    if candidate <= now:
+    if candidate <= local_now:
         candidate += timedelta(days=1)
     return candidate
 
@@ -280,32 +353,30 @@ def _run_scheduled_multiplica() -> bool:
     return True
 
 
-def _run_scheduled_financeiro_medicao() -> bool:
-    from flows.financeiro_medicao.runner import run_once
-
-    try:
-        payload = run_once()
-    except Exception:
-        logger.error(
-            "[financeiro_medicao] Falha agendada; "
-            "error_code=UNEXPECTED_ERROR."
-        )
+def _run_scheduled_financeiro_medicao(
+    *,
+    scheduled_for: datetime | None = None,
+) -> bool:
+    settings = _financeiro_schedule_settings()
+    if settings is None:
         return False
-
-    if payload.get("success") is True:
-        logger.info("[financeiro_medicao] Coleta agendada concluída.")
-        return True
-
-    error_code = (
-        "LOCKED"
-        if payload.get("error_code") == "LOCKED"
-        else "RUN_FAILED"
+    now = _local_now()
+    if scheduled_for is None:
+        scheduled_for = financeiro_schedule.next_event_at(
+            now,
+            settings,
+        )
+    financeiro_schedule.request_run(
+        settings,
+        scheduled_for,
+        now=now,
     )
-    logger.warning(
-        "[financeiro_medicao] Coleta agendada não concluída; "
-        f"error_code={error_code}."
+    return bool(
+        financeiro_schedule.run_signal_if_due(
+            settings,
+            now=now,
+        )
     )
-    return False
 
 
 def _protheus_signal_mode(path: Path) -> str:
@@ -845,14 +916,42 @@ def _scheduled_events(now: datetime | None = None) -> list[tuple[str, datetime]]
         events.append(("routerbox", _next_routerbox_run_at(now)))
     if MULTIPLICA_SCHEDULE_ENABLED:
         events.append(("multiplica", _next_multiplica_run_at(now)))
-    if FINANCEIRO_MEDICAO_SCHEDULE_ENABLED:
+    financeiro_settings = _financeiro_schedule_settings()
+    if financeiro_settings is not None:
         events.append(
             (
                 "financeiro_medicao",
-                _next_financeiro_medicao_run_at(now),
+                financeiro_schedule.next_event_at(
+                    now,
+                    financeiro_settings,
+                ),
             )
         )
     return sorted(events, key=lambda event: event[1])
+
+
+def _advance_scheduled_event(
+    events: dict[str, datetime],
+    name: str,
+) -> None:
+    now = _local_now()
+    if name == "protheus" and PROTHEUS_ENABLED:
+        events[name] = _next_run_at(now)
+    elif name == "routerbox" and ROUTERBOX_ENABLED:
+        events[name] = _next_routerbox_run_at(now)
+    elif name == "multiplica" and MULTIPLICA_SCHEDULE_ENABLED:
+        events[name] = _next_multiplica_run_at(now)
+    elif name == "financeiro_medicao":
+        financeiro_settings = _financeiro_schedule_settings()
+        if financeiro_settings is None:
+            events.pop(name, None)
+        else:
+            events[name] = financeiro_schedule.next_event_at(
+                now,
+                financeiro_settings,
+            )
+    else:
+        events.pop(name, None)
 
 
 def loop_forever() -> None:
@@ -879,8 +978,8 @@ def loop_forever() -> None:
     logger.info(
         "Financeiro medição: "
         f"scheduled={FINANCEIRO_MEDICAO_SCHEDULE_ENABLED} "
-        f"time={FINANCEIRO_MEDICAO_SCHEDULE_HOUR:02d}:"
-        f"{FINANCEIRO_MEDICAO_SCHEDULE_MINUTE:02d} "
+        f"time={FINANCEIRO_MEDICAO_SCHEDULE_HOUR}:"
+        f"{FINANCEIRO_MEDICAO_SCHEDULE_MINUTE} "
         f"timezone={FINANCEIRO_MEDICAO_TIMEZONE}"
     )
 
@@ -900,21 +999,24 @@ def loop_forever() -> None:
             logger.error(f"Erro no RouterBox run_on_start: {exc}")
             logger.error(traceback.format_exc())
 
+    scheduled_events = dict(_scheduled_events())
     while True:
         try:
             if _run_multiplica_signal_if_present():
                 continue
 
             # Determinar qual scheduler dispara primeiro
-            events = _scheduled_events()
-
-            if not events:
+            if not scheduled_events:
                 logger.warning("Nenhuma automação habilitada; aguardando configuração.")
                 time.sleep(POLL_INTERVAL_S)
+                scheduled_events.update(_scheduled_events())
                 continue
 
             # Ordenar por horário
-            next_name, next_time = events[0]
+            next_name, next_time = min(
+                scheduled_events.items(),
+                key=lambda event: event[1],
+            )
 
             # Dormir até o próximo evento, mas checar signal a cada POLL_INTERVAL_S
             remaining = (next_time - _local_now()).total_seconds()
@@ -934,15 +1036,6 @@ def loop_forever() -> None:
                 ):
                     break
 
-                # Checar se RouterBox deve disparar antes do Protheus
-                if ROUTERBOX_ENABLED:
-                    rb_remaining = (
-                        _next_routerbox_run_at() - _local_now()
-                    ).total_seconds()
-                    if rb_remaining <= 0:
-                        _run_routerbox_backlog()
-                        break
-
                 chunk = min(remaining, float(POLL_INTERVAL_S))
                 time.sleep(chunk)
                 remaining = (next_time - _local_now()).total_seconds()
@@ -957,7 +1050,13 @@ def loop_forever() -> None:
                 elif next_name == "multiplica":
                     _run_scheduled_multiplica()
                 elif next_name == "financeiro_medicao":
-                    _run_scheduled_financeiro_medicao()
+                    _run_scheduled_financeiro_medicao(
+                        scheduled_for=next_time,
+                    )
+                _advance_scheduled_event(
+                    scheduled_events,
+                    next_name,
+                )
 
         except KeyboardInterrupt:
             logger.info("KeyboardInterrupt recebido. Encerrando.")

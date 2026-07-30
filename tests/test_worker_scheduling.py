@@ -4,6 +4,7 @@ import builtins
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
@@ -15,6 +16,15 @@ from flows.multiplica import runner as multiplica_runner
 
 
 class WorkerSchedulingTests(unittest.TestCase):
+    def _financeiro_settings(self, runtime_root):
+        return SimpleNamespace(
+            runtime_root=Path(runtime_root),
+            schedule_enabled=True,
+            schedule_hour=0,
+            schedule_minute=1,
+            timezone="America/Sao_Paulo",
+        )
+
     def test_financeiro_medicao_disabled_by_default(self):
         self.assertFalse(worker.FINANCEIRO_MEDICAO_SCHEDULE_ENABLED)
 
@@ -28,8 +38,8 @@ class WorkerSchedulingTests(unittest.TestCase):
     def test_runtime_scheduler_converts_utc_to_sao_paulo(self):
         with patch.object(
             worker,
-            "LOCAL_TIMEZONE",
-            ZoneInfo("America/Sao_Paulo"),
+            "FINANCEIRO_MEDICAO_TIMEZONE",
+            "America/Sao_Paulo",
         ):
             now = datetime(
                 2026,
@@ -70,49 +80,6 @@ class WorkerSchedulingTests(unittest.TestCase):
             datetime(2026, 7, 30, 0, 1),
         )
 
-    def test_existing_schedule_helpers_preserve_times_in_local_timezone(self):
-        timezone = ZoneInfo("America/Sao_Paulo")
-        utc = ZoneInfo("UTC")
-        with patch.object(worker, "LOCAL_TIMEZONE", timezone), patch.object(
-            worker,
-            "SCHEDULE_HOUR",
-            6,
-        ), patch.object(worker, "SCHEDULE_MINUTE", 0), patch.object(
-            worker,
-            "MULTIPLICA_SCHEDULE_HOUR",
-            23,
-        ), patch.object(
-            worker,
-            "MULTIPLICA_SCHEDULE_MINUTE",
-            50,
-        ), patch.object(
-            worker,
-            "ROUTERBOX_START_MINUTES",
-            5 * 60 + 30,
-        ):
-            protheus = worker._next_run_at(
-                datetime(2026, 7, 30, 8, 0, tzinfo=utc)
-            )
-            multiplica = worker._next_multiplica_run_at(
-                datetime(2026, 7, 31, 2, 40, tzinfo=utc)
-            )
-            routerbox = worker._next_routerbox_run_at(
-                datetime(2026, 7, 30, 8, 0, tzinfo=utc)
-            )
-
-        self.assertEqual(
-            protheus.isoformat(),
-            "2026-07-30T06:00:00-03:00",
-        )
-        self.assertEqual(
-            multiplica.isoformat(),
-            "2026-07-30T23:50:00-03:00",
-        )
-        self.assertEqual(
-            routerbox.isoformat(),
-            "2026-07-30T05:30:00-03:00",
-        )
-
     def test_sleep_helper_compares_timezone_aware_datetimes(self):
         target = datetime(
             2026,
@@ -146,28 +113,86 @@ class WorkerSchedulingTests(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_financeiro_medicao_dispatches_run_once_without_nested_lock(self):
-        with patch.object(
-            financeiro_medicao_runner,
-            "run_once",
-            return_value={"success": True, "error_code": ""},
-        ) as run_once, patch.object(worker, "file_lock") as worker_lock:
-            result = worker._run_scheduled_financeiro_medicao()
+        timezone = ZoneInfo("America/Sao_Paulo")
+        scheduled_for = datetime(
+            2026,
+            7,
+            30,
+            0,
+            1,
+            tzinfo=timezone,
+        )
+        locked_paths = []
+
+        @contextmanager
+        def recording_lock(path, *, wait_seconds):
+            locked_paths.append(Path(path))
+            yield
+
+        with tempfile.TemporaryDirectory() as temporary:
+            settings = self._financeiro_settings(temporary)
+            Path(temporary, "runtime").mkdir()
+            with patch.object(
+                worker,
+                "_financeiro_schedule_settings",
+                return_value=settings,
+            ), patch.object(
+                worker,
+                "_local_now",
+                return_value=scheduled_for,
+            ), patch.object(
+                financeiro_medicao_runner,
+                "run_once",
+                return_value={"success": True, "error_code": ""},
+            ) as run_once, patch.object(
+                worker,
+                "file_lock",
+                side_effect=recording_lock,
+            ):
+                result = worker._run_scheduled_financeiro_medicao(
+                    scheduled_for=scheduled_for,
+                )
 
         self.assertTrue(result)
-        run_once.assert_called_once_with()
-        worker_lock.assert_not_called()
+        run_once.assert_called_once_with(
+            day=scheduled_for.date(),
+            scheduled_for=scheduled_for,
+        )
+        self.assertNotIn(worker.GLOBAL_CHROMIUM_LOCK, locked_paths)
 
     def test_financeiro_medicao_locked_result_is_sanitized_and_nonfatal(self):
-        with patch.object(
-            financeiro_medicao_runner,
-            "run_once",
-            return_value={
-                "success": False,
-                "error_code": "LOCKED",
-                "private": "secret-token",
-            },
-        ), patch.object(worker.logger, "warning") as warning:
-            result = worker._run_scheduled_financeiro_medicao()
+        timezone = ZoneInfo("America/Sao_Paulo")
+        scheduled_for = datetime(
+            2026,
+            7,
+            30,
+            0,
+            1,
+            tzinfo=timezone,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            settings = self._financeiro_settings(temporary)
+            Path(temporary, "runtime").mkdir()
+            with patch.object(
+                worker,
+                "_financeiro_schedule_settings",
+                return_value=settings,
+            ), patch.object(
+                worker,
+                "_local_now",
+                return_value=scheduled_for,
+            ), patch.object(
+                financeiro_medicao_runner,
+                "run_once",
+                return_value={
+                    "success": False,
+                    "error_code": "LOCKED",
+                    "private": "secret-token",
+                },
+            ), patch.object(worker.logger, "warning") as warning:
+                result = worker._run_scheduled_financeiro_medicao(
+                    scheduled_for=scheduled_for,
+                )
 
         self.assertFalse(result)
         logged = " ".join(str(call) for call in warning.call_args_list)
@@ -176,15 +201,37 @@ class WorkerSchedulingTests(unittest.TestCase):
 
     def test_financeiro_medicao_exception_is_sanitized_and_nonfatal(self):
         secret = "https://user:password@example.invalid/?token=secret"
-        with patch.object(
-            financeiro_medicao_runner,
-            "run_once",
-            side_effect=RuntimeError(secret),
-        ), patch.object(worker.logger, "error") as error:
-            result = worker._run_scheduled_financeiro_medicao()
+        timezone = ZoneInfo("America/Sao_Paulo")
+        scheduled_for = datetime(
+            2026,
+            7,
+            30,
+            0,
+            1,
+            tzinfo=timezone,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            settings = self._financeiro_settings(temporary)
+            Path(temporary, "runtime").mkdir()
+            with patch.object(
+                worker,
+                "_financeiro_schedule_settings",
+                return_value=settings,
+            ), patch.object(
+                worker,
+                "_local_now",
+                return_value=scheduled_for,
+            ), patch.object(
+                financeiro_medicao_runner,
+                "run_once",
+                side_effect=RuntimeError(secret),
+            ), patch.object(worker.logger, "warning") as warning:
+                result = worker._run_scheduled_financeiro_medicao(
+                    scheduled_for=scheduled_for,
+                )
 
         self.assertFalse(result)
-        logged = " ".join(str(call) for call in error.call_args_list)
+        logged = " ".join(str(call) for call in warning.call_args_list)
         self.assertIn("UNEXPECTED_ERROR", logged)
         self.assertNotIn(secret, logged)
 
@@ -202,13 +249,17 @@ class WorkerSchedulingTests(unittest.TestCase):
             "_local_now",
             return_value=target,
         ), patch.object(
-            financeiro_medicao_runner,
-            "run_once",
-            return_value={"success": True, "error_code": ""},
-        ) as run_once:
+            worker,
+            "_run_scheduled_financeiro_medicao",
+            return_value=True,
+        ) as dispatch, patch.object(
+            worker,
+            "_advance_scheduled_event",
+            side_effect=KeyboardInterrupt(),
+        ):
             worker.loop_forever()
 
-        run_once.assert_called_once_with()
+        dispatch.assert_called_once_with(scheduled_for=target)
 
     def test_protheus_disabled_keeps_only_routerbox(self):
         now = datetime(2026, 7, 23, 12, 0)

@@ -112,6 +112,20 @@ O `worker.py` é o `CMD` default do Dockerfile. Configurável via envs:
 | `FINANCEIRO_MEDICAO_SCHEDULE_HOUR` | `0` | Hora local da coleta de medição |
 | `FINANCEIRO_MEDICAO_SCHEDULE_MINUTE` | `1` | Minuto local da coleta de medição |
 | `FINANCEIRO_MEDICAO_TIMEZONE` | `America/Sao_Paulo` | Fuso usado pelo scheduler da medição |
+| `FINANCEIRO_MEDICAO_LOGA_URL` | sem default | URL HTTPS do dashboard Loga, sem credenciais |
+| `FINANCEIRO_MEDICAO_RUNTIME_ROOT` | `/app/data_pipeline/financeiro_medicao` | Raiz persistente exclusiva da medição |
+| `FINANCEIRO_MEDICAO_LOCK_WAIT_SECONDS` | `1200` | Espera máxima pelos locks do fluxo e do Chromium |
+| `FINANCEIRO_MEDICAO_RETRY_BASE_SECONDS` | `60` | Espera inicial entre tentativas transitórias do scheduler |
+| `FINANCEIRO_MEDICAO_RETRY_MAX_SECONDS` | `900` | Limite do backoff exponencial do scheduler |
+| `LOGA_DASHBOARD_USER_FILE` | vazio | Arquivo de secret do usuário; tem precedência sobre envs |
+| `LOGA_DASHBOARD_PASSWORD_FILE` | vazio | Arquivo de secret da senha; tem precedência sobre envs |
+| `LOGA_DASHBOARD_USER` | vazio | Usuário direto, usado quando `*_USER_FILE` está vazio |
+| `LOGA_DASHBOARD_PASSWORD` | vazio | Senha direta, usada quando `*_PASSWORD_FILE` está vazio |
+
+Se as credenciais `LOGA_DASHBOARD_*` não forem informadas, o fluxo reutiliza
+`MULTIPLICA_LOGA_USER` e `MULTIPLICA_LOGA_PASSWORD` como último fallback.
+Arquivos de secret são preferíveis às variáveis diretas e nunca devem ser
+versionados.
 
 ### Contrato de arquivos no volume compartilhado
 
@@ -123,9 +137,15 @@ DATA_PIPELINE_DIR/
 ├── run.log        # worker ESCREVE                      (sink loguru ao vivo)
 ├── run.done       # worker CRIA ao final                (JSON com resultado)
 ├── signal.ready   # worker CRIA se ok > 0               (flag de pendência)
-└── multiplica/
+├── multiplica/
     ├── multiplica.signal     # acionamento manual; worker consome
     └── run_multiplica.done   # resultado sanitizado da coleta
+└── financeiro_medicao/
+    ├── done.json                     # último resultado sanitizado do fluxo
+    ├── published/                    # bundles publicados atomicamente
+    └── runtime/
+        ├── schedule.signal.json      # tentativa pendente e próximo retry
+        └── schedule-watermark.json   # dia concluído com success ou terminal
 ```
 
 O sinal manual do Multiplica é aceito mesmo com
@@ -146,6 +166,39 @@ O login é concluído por uma pessoa no Chrome visível. Usuário e senha não s
 armazenados no código ou em variáveis. O arquivo
 `auth/loga-storage-state.json` deve ser transferido por canal seguro para o
 runtime persistente do serviço, com ACL restrita, e nunca entrar no Git.
+
+### Ativação segura da medição financeira
+
+A agenda é opt-in. Ela faz catch-up do dia atual após 00:01 quando não existe
+sucesso nem resultado terminal persistido, inclusive depois de reinício do
+worker. Falhas transitórias são reprogramadas com backoff; falhas permanentes
+encerram o evento do dia para evitar loop quente.
+
+1. Mantenha `FINANCEIRO_MEDICAO_SCHEDULE_ENABLED=false`.
+2. Configure a URL HTTPS, o runtime persistente, fuso, horário e espera de lock.
+3. Injete usuário e senha por `LOGA_DASHBOARD_*_FILE` sempre que o ambiente
+   oferecer secrets montados; use as variáveis diretas apenas como fallback.
+4. Faça uma execução controlada com
+   `python -m flows.financeiro_medicao.runner` e confira somente os campos
+   sanitizados de `financeiro_medicao/done.json`.
+5. Habilite `FINANCEIRO_MEDICAO_SCHEDULE_ENABLED=true` e reinicie um único
+   worker responsável por essa agenda.
+
+Exemplo sem valores reais:
+
+```text
+FINANCEIRO_MEDICAO_LOGA_URL=https://ENDERECO-HTTPS-DA-LOGA
+FINANCEIRO_MEDICAO_RUNTIME_ROOT=/app/data_pipeline/financeiro_medicao
+LOGA_DASHBOARD_USER_FILE=/run/secrets/loga_dashboard_user
+LOGA_DASHBOARD_PASSWORD_FILE=/run/secrets/loga_dashboard_password
+FINANCEIRO_MEDICAO_SCHEDULE_ENABLED=false
+```
+
+Para rollback, volte `FINANCEIRO_MEDICAO_SCHEDULE_ENABLED=false` e reinicie o
+worker. Não apague `done.json`, `schedule.signal.json`, o watermark, bundles ou
+o runtime: esses artefatos preservam auditoria, idempotência e uma tentativa
+transitória ainda pendente. Logs e status expõem apenas códigos de erro; não
+inclua URLs autenticadas, usuários, senhas ou tokens neles.
 
 `run.done` payload:
 
@@ -224,6 +277,11 @@ FINANCEIRO_MEDICAO_SCHEDULE_ENABLED=false
 FINANCEIRO_MEDICAO_SCHEDULE_HOUR=0
 FINANCEIRO_MEDICAO_SCHEDULE_MINUTE=1
 FINANCEIRO_MEDICAO_TIMEZONE=America/Sao_Paulo
+FINANCEIRO_MEDICAO_LOGA_URL=https://ENDERECO-HTTPS-DA-LOGA
+FINANCEIRO_MEDICAO_RUNTIME_ROOT=/app/data_pipeline/financeiro_medicao
+FINANCEIRO_MEDICAO_LOCK_WAIT_SECONDS=1200
+LOGA_DASHBOARD_USER_FILE=/run/secrets/loga_dashboard_user
+LOGA_DASHBOARD_PASSWORD_FILE=/run/secrets/loga_dashboard_password
 ```
 
 Durante o corte, o RouterBox automático deve existir em apenas um serviço.
