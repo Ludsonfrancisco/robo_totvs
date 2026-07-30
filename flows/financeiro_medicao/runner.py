@@ -37,6 +37,7 @@ from .events import (
     write_success_receipt as _write_success_receipt,
 )
 from .loga import CollectionError, collect
+from .retention import cleanup as cleanup_retention
 from .workbook import WorkbookInvalid
 from flows.common.locks import LockUnavailable, file_lock
 
@@ -140,6 +141,45 @@ def _lock_wait_seconds(settings) -> float:
 
 def _write_done(runtime_root: Path, payload: dict) -> None:
     _atomic_json_write(runtime_root / "done.json", payload)
+
+
+def _finish_with_retention(
+    payload,
+    runtime_root,
+    *,
+    now,
+    current_references,
+):
+    try:
+        cleanup_retention(
+            Path(runtime_root).resolve(strict=True),
+            current_references=current_references,
+            now=now,
+        )
+    except Exception:
+        pass
+    return payload
+
+
+def _retention_references(runtime_root, payload, event_id):
+    runtime_root = Path(runtime_root)
+    references = []
+    run_id = payload.get("run_id") if isinstance(payload, dict) else None
+    if isinstance(run_id, str) and _RUN_ID.fullmatch(run_id):
+        references.extend(
+            (
+                runtime_root / "inbox" / run_id,
+                runtime_root / "runtime" / "proofs" / run_id,
+            )
+        )
+    if event_id is not None:
+        references.extend(
+            (
+                event_result_path(runtime_root, event_id),
+                event_receipt_path(runtime_root, event_id),
+            )
+        )
+    return references
 
 
 def _collect_bundle(
@@ -289,14 +329,32 @@ def run_once(
                     or existing.get("error_code")
                     not in RETRYABLE_ERRORS | {"UNEXPECTED_ERROR"}
                 ):
-                    return existing
+                    return _finish_with_retention(
+                        existing,
+                        runtime_root,
+                        now=started_at,
+                        current_references=_retention_references(
+                            runtime_root,
+                            existing,
+                            event_id,
+                        ),
+                    )
                 recovered = _reconcile_published_event_locked(
                     settings,
                     event_id,
                     scheduled_for,
                 )
                 if recovered is not None:
-                    return recovered
+                    return _finish_with_retention(
+                        recovered,
+                        runtime_root,
+                        now=started_at,
+                        current_references=_retention_references(
+                            runtime_root,
+                            recovered,
+                            event_id,
+                        ),
+                    )
             try:
                 with file_lock(
                     chromium_lock,
@@ -393,7 +451,16 @@ def run_once(
                     payload,
                 )
             _write_done(runtime_root, payload)
-            return payload
+            return _finish_with_retention(
+                payload,
+                runtime_root,
+                now=finished_at,
+                current_references=_retention_references(
+                    runtime_root,
+                    payload,
+                    event_id,
+                ),
+            )
     except LockUnavailable:
         error_code = "LOCKED"
 
