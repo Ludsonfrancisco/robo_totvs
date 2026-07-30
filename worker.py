@@ -241,20 +241,75 @@ def _run_scheduled_multiplica() -> bool:
     return True
 
 
-def _consume_signal() -> dict | None:
-    """Lê e remove run.signal. Retorna payload (dict) ou None se não existir."""
-    if not SIGNAL_FILE.exists():
-        return None
+def _protheus_signal_mode(path: Path) -> str:
     try:
-        raw = SIGNAL_FILE.read_text(encoding="utf-8")
+        raw = path.read_text(encoding="utf-8")
         payload = json.loads(raw) if raw.strip() else {}
-    except (OSError, ValueError):
-        payload = {}
-    try:
-        SIGNAL_FILE.unlink()
-    except OSError:
+        if payload.get("mode") == "retry-falhos":
+            return "retry-falhos"
+    except (AttributeError, OSError, ValueError):
         pass
-    return payload
+    return "full"
+
+
+def _protheus_claims() -> list[Path]:
+    parent = SIGNAL_FILE.parent
+    if not parent.exists():
+        return []
+
+    prefix = f".{SIGNAL_FILE.name}.claimed."
+    claims = []
+    for candidate in parent.iterdir():
+        suffix = candidate.name.removeprefix(prefix)
+        if (
+            candidate.is_file()
+            and candidate.name.startswith(prefix)
+            and len(suffix) == 32
+            and all(character in "0123456789abcdef" for character in suffix)
+        ):
+            claims.append(candidate)
+    return sorted(claims, key=lambda path: path.name)
+
+
+def _restore_protheus_claim(claimed_signal: Path) -> None:
+    _request_protheus_retry(_protheus_signal_mode(claimed_signal))
+    claimed_signal.unlink(missing_ok=True)
+
+
+def _reconcile_protheus_claims() -> None:
+    for claimed_signal in _protheus_claims():
+        _restore_protheus_claim(claimed_signal)
+
+
+def _run_protheus_signal_if_present() -> bool:
+    claim_lock = SIGNAL_FILE.parent / (
+        f".{SIGNAL_FILE.name}.claim.lock"
+    )
+    try:
+        with file_lock(claim_lock, wait_seconds=0):
+            _reconcile_protheus_claims()
+            if not SIGNAL_FILE.exists():
+                return False
+
+            claimed_signal = SIGNAL_FILE.with_name(
+                f".{SIGNAL_FILE.name}.claimed.{uuid4().hex}"
+            )
+            try:
+                os.replace(SIGNAL_FILE, claimed_signal)
+            except FileNotFoundError:
+                return False
+
+            mode = _protheus_signal_mode(claimed_signal)
+            logger.info(f"Signal Protheus detectado. mode={mode}")
+            try:
+                _run_with_auto_retry(mode)
+            except BaseException:
+                _restore_protheus_claim(claimed_signal)
+                raise
+            claimed_signal.unlink(missing_ok=True)
+            return True
+    except LockUnavailable:
+        return False
 
 
 def _request_protheus_retry(mode: str) -> None:
@@ -444,21 +499,11 @@ def _executar_robo(mode: str) -> tuple[bool, str, int | None]:
         if INCLUDE_DISMISSED:
             argv = ["--incluir-desligados"]
 
-    sink_id = logger.add(
-        LOG_FILE,
-        level="INFO",
-        encoding="utf-8",
-        format="{time:HH:mm:ss} | {level: <7} | {extra[etapa]:<14} | {message}",
-        enqueue=False,
-        filter=lambda r: r["extra"].setdefault("etapa", "-") or True,
-    )
-
-    logger.bind(etapa="worker").info(f"== Início (mode={mode}, started_at={started_at}) ==")
-
     success = False
     message = ""
     exit_code: int | None = None
     lock_error = None
+    sink_id = None
 
     try:
         from main import main as robo_main
@@ -467,6 +512,23 @@ def _executar_robo(mode: str) -> tuple[bool, str, int | None]:
             GLOBAL_CHROMIUM_LOCK,
             wait_seconds=CHROMIUM_LOCK_WAIT_SECONDS,
         ):
+            _cleanup_run_artifacts()
+            sink_id = logger.add(
+                LOG_FILE,
+                level="INFO",
+                encoding="utf-8",
+                format=(
+                    "{time:HH:mm:ss} | {level: <7} | "
+                    "{extra[etapa]:<14} | {message}"
+                ),
+                enqueue=False,
+                filter=lambda r: (
+                    r["extra"].setdefault("etapa", "-") or True
+                ),
+            )
+            logger.bind(etapa="worker").info(
+                f"== Início (mode={mode}, started_at={started_at}) =="
+            )
             exit_code = robo_main(argv)
         success = exit_code == 0
         if exit_code == 0:
@@ -492,11 +554,14 @@ def _executar_robo(mode: str) -> tuple[bool, str, int | None]:
         logger.bind(etapa="worker").error(message)
         logger.bind(etapa="worker").error(traceback.format_exc())
 
+    if lock_error is not None:
+        raise lock_error
+
     # Guard: main.py may have removed our shared sink via
     # core/log.py's configurar_log() (logger.remove() without args).
     # Re-add the shared sink so the "Fim" line and subsequent logs
     # appear in the Portal D+ tail view.
-    if sink_id not in logger._core.handlers:
+    if sink_id is None or sink_id not in logger._core.handlers:
         sink_id = logger.add(
             LOG_FILE,
             level="INFO",
@@ -513,13 +578,10 @@ def _executar_robo(mode: str) -> tuple[bool, str, int | None]:
         logger.remove(sink_id)
     except ValueError:
         pass
-    if lock_error is not None:
-        raise lock_error
     return success, message, exit_code
 
 
 def _run_once(mode: str = "scheduled") -> None:
-    _cleanup_run_artifacts()
     started_at = _now_iso()
     success, message, exit_code = _executar_robo(mode)
     total, ok, falhas = _read_checkpoint_summary()
@@ -583,8 +645,6 @@ def _run_with_auto_retry(mode: str) -> None:
     )
     time.sleep(RETRY_DELAY_S)
 
-    # Limpa artifacts antes do retry
-    _cleanup_run_artifacts()
     try:
         _run_once(mode=mode)
     except LockUnavailable:
@@ -777,11 +837,10 @@ def loop_forever() -> None:
                     break
 
                 # Checar signal do Protheus
-                if PROTHEUS_ENABLED and SIGNAL_FILE.exists():
-                    payload = _consume_signal() or {}
-                    mode = payload.get("mode", "full")
-                    logger.info(f"Signal Protheus detectado. mode={mode}")
-                    _run_with_auto_retry(mode=mode)
+                if (
+                    PROTHEUS_ENABLED
+                    and _run_protheus_signal_if_present()
+                ):
                     break
 
                 # Checar se RouterBox deve disparar antes do Protheus

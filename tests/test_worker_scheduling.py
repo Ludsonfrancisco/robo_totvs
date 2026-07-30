@@ -318,6 +318,241 @@ class WorkerSchedulingTests(unittest.TestCase):
                 {"mode": "full"},
             )
 
+    def test_protheus_claim_ack_preserves_concurrent_producer_signal(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            signal_file = root / "run.signal"
+            signal_file.write_text(
+                '{"mode":"retry-falhos"}\n',
+                encoding="utf-8",
+            )
+
+            def publish_concurrent_signal(_mode):
+                signal_file.write_text(
+                    '{"mode":"full","request":"concurrent"}\n',
+                    encoding="utf-8",
+                )
+
+            with patch.object(
+                worker, "SIGNAL_FILE", signal_file
+            ), patch.object(
+                worker,
+                "_run_with_auto_retry",
+                side_effect=publish_concurrent_signal,
+            ):
+                consumed = worker._run_protheus_signal_if_present()
+
+            self.assertTrue(consumed)
+            self.assertEqual(
+                json.loads(signal_file.read_text(encoding="utf-8")),
+                {"mode": "full", "request": "concurrent"},
+            )
+            self.assertEqual(
+                list(root.glob(".run.signal.claimed.*")),
+                [],
+            )
+
+    def test_locked_protheus_claim_merges_with_concurrent_full_signal(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            signal_file = root / "run.signal"
+            signal_file.write_text(
+                '{"mode":"retry-falhos"}\n',
+                encoding="utf-8",
+            )
+
+            def contend_after_concurrent_publish(*, mode):
+                self.assertEqual(mode, "retry-falhos")
+                signal_file.write_text(
+                    '{"mode":"full","request":"concurrent"}\n',
+                    encoding="utf-8",
+                )
+                raise LockUnavailable("LOCKED")
+
+            with patch.object(
+                worker, "SIGNAL_FILE", signal_file
+            ), patch.object(
+                worker,
+                "_run_once",
+                side_effect=contend_after_concurrent_publish,
+            ), patch.object(worker.time, "sleep"):
+                consumed = worker._run_protheus_signal_if_present()
+
+            self.assertTrue(consumed)
+            self.assertEqual(
+                json.loads(signal_file.read_text(encoding="utf-8")),
+                {"mode": "full", "request": "concurrent"},
+            )
+            self.assertEqual(
+                list(root.glob(".run.signal.claimed.*")),
+                [],
+            )
+
+    def test_protheus_claim_is_restored_when_dispatch_raises(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            signal_file = root / "run.signal"
+            signal_file.write_text(
+                '{"mode":"full"}\n',
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                worker, "SIGNAL_FILE", signal_file
+            ), patch.object(
+                worker,
+                "_run_with_auto_retry",
+                side_effect=RuntimeError("transient worker failure"),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "transient worker failure",
+                ):
+                    worker._run_protheus_signal_if_present()
+
+            self.assertEqual(
+                json.loads(signal_file.read_text(encoding="utf-8")),
+                {"mode": "full"},
+            )
+            self.assertEqual(
+                list(root.glob(".run.signal.claimed.*")),
+                [],
+            )
+
+    def test_orphaned_protheus_claim_is_recovered_after_restart(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            signal_file = root / "run.signal"
+            orphan = root / (
+                ".run.signal.claimed."
+                "dddddddddddddddddddddddddddddddd"
+            )
+            unrelated = root / ".run.signal.claimed.not-ours"
+            orphan.write_text(
+                '{"mode":"retry-falhos"}\n',
+                encoding="utf-8",
+            )
+            unrelated.touch()
+
+            with patch.object(
+                worker, "SIGNAL_FILE", signal_file
+            ), patch.object(
+                worker, "_run_with_auto_retry"
+            ) as run:
+                consumed = worker._run_protheus_signal_if_present()
+
+            self.assertTrue(consumed)
+            run.assert_called_once_with("retry-falhos")
+            self.assertFalse(orphan.exists())
+            self.assertFalse(signal_file.exists())
+            self.assertTrue(unrelated.exists())
+
+    def test_active_protheus_claim_is_not_recovered_by_other_worker(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            signal_file = root / "run.signal"
+            active_claim = root / (
+                ".run.signal.claimed."
+                "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            )
+            active_claim.write_text(
+                '{"mode":"full"}\n',
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                worker, "SIGNAL_FILE", signal_file
+            ), patch.object(
+                worker,
+                "file_lock",
+                side_effect=LockUnavailable("LOCKED"),
+            ), patch.object(
+                worker, "_run_with_auto_retry"
+            ) as run:
+                consumed = worker._run_protheus_signal_if_present()
+
+            self.assertFalse(consumed)
+            self.assertTrue(active_claim.exists())
+            self.assertFalse(signal_file.exists())
+            run.assert_not_called()
+
+    def test_lock_contention_preserves_previous_run_artifacts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            log_file = root / "run.log"
+            done_file = root / "run.done"
+            ready_file = root / "signal.ready"
+            log_file.write_text("previous log", encoding="utf-8")
+            done_file.write_text("previous done", encoding="utf-8")
+            ready_file.write_text("previous ready", encoding="utf-8")
+
+            with patch.object(
+                worker, "LOG_FILE", log_file
+            ), patch.object(
+                worker, "DONE_FILE", done_file
+            ), patch.object(
+                worker, "READY_FILE", ready_file
+            ), patch.object(
+                worker,
+                "file_lock",
+                side_effect=LockUnavailable("LOCKED"),
+            ), patch("main.main"):
+                with self.assertRaises(LockUnavailable):
+                    worker._run_once("full")
+
+            self.assertEqual(
+                log_file.read_text(encoding="utf-8"),
+                "previous log",
+            )
+            self.assertEqual(
+                done_file.read_text(encoding="utf-8"),
+                "previous done",
+            )
+            self.assertEqual(
+                ready_file.read_text(encoding="utf-8"),
+                "previous ready",
+            )
+
+    def test_acquired_lock_cleans_artifacts_before_robot_execution(self):
+        events = []
+
+        @contextmanager
+        def recording_lock(_path, *, wait_seconds):
+            events.append(("lock-enter", wait_seconds))
+            try:
+                yield
+            finally:
+                events.append(("lock-exit", wait_seconds))
+
+        def record_cleanup():
+            events.append(("cleanup",))
+
+        def robot_main(_argv):
+            events.append(("robot",))
+            return 0
+
+        with tempfile.TemporaryDirectory() as temporary, patch.object(
+            worker, "LOG_FILE", Path(temporary) / "run.log"
+        ), patch.object(
+            worker, "file_lock", side_effect=recording_lock
+        ), patch.object(
+            worker,
+            "_cleanup_run_artifacts",
+            side_effect=record_cleanup,
+        ), patch(
+            "main.main", side_effect=robot_main
+        ):
+            worker._run_once("full")
+
+        self.assertEqual(
+            events[:3],
+            [
+                ("lock-enter", worker.CHROMIUM_LOCK_WAIT_SECONDS),
+                ("cleanup",),
+                ("robot",),
+            ],
+        )
+
     def test_routerbox_browser_entrypoint_uses_global_lock(self):
         events = []
 
