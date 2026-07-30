@@ -3,6 +3,7 @@ from datetime import date, datetime
 from pathlib import Path
 from xml.etree.ElementTree import ParseError
 from zipfile import BadZipFile, ZipFile
+from zlib import error as ZlibError
 
 from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
@@ -125,7 +126,17 @@ def validate_workbook(path, query_start, query_end):
             return WorkbookInfo(row_count=row_count, headers=REQUIRED_HEADERS, size=size)
     except WorkbookInvalid:
         raise
-    except (BadZipFile, InvalidFileException, OSError, ValueError, KeyError, ParseError, TypeError) as error:
+    except (
+        BadZipFile,
+        InvalidFileException,
+        OSError,
+        ValueError,
+        KeyError,
+        ParseError,
+        RuntimeError,
+        TypeError,
+        ZlibError,
+    ) as error:
         raise WorkbookInvalid("Planilha de medição inválida.") from error
     finally:
         if rows is not None:

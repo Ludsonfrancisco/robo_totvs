@@ -4,6 +4,7 @@ from tempfile import TemporaryDirectory
 import unittest
 import warnings
 from zipfile import ZIP_DEFLATED, ZipFile
+import struct
 
 from openpyxl import Workbook
 
@@ -60,6 +61,28 @@ class FinanceiroMedicaoWorkbookTests(unittest.TestCase):
             for name, content in extra_entries:
                 target.writestr(name, content)
 
+    def patch_zip_entry(self, source_path, target_path, entry_name, *, encrypted=False, corrupt_payload=False):
+        content = bytearray(source_path.read_bytes())
+        central_directory = content.rfind(b"PK\x05\x06")
+        cursor = struct.unpack_from("<I", content, central_directory + 16)[0]
+        while content[cursor : cursor + 4] == b"PK\x01\x02":
+            filename_size, extra_size, comment_size = struct.unpack_from("<HHH", content, cursor + 28)
+            filename = bytes(content[cursor + 46 : cursor + 46 + filename_size]).decode("utf-8")
+            local_offset = struct.unpack_from("<I", content, cursor + 42)[0]
+            if filename == entry_name:
+                if encrypted:
+                    flags = struct.unpack_from("<H", content, cursor + 8)[0] | 1
+                    struct.pack_into("<H", content, cursor + 8, flags)
+                    struct.pack_into("<H", content, local_offset + 6, flags)
+                if corrupt_payload:
+                    local_name_size, local_extra_size = struct.unpack_from("<HH", content, local_offset + 26)
+                    payload_offset = local_offset + 30 + local_name_size + local_extra_size
+                    content[payload_offset + 1] ^= 0xFF
+                target_path.write_bytes(content)
+                return
+            cursor += 46 + filename_size + extra_size + comment_size
+        self.fail(f"Entrada ZIP não encontrada: {entry_name}")
+
     def test_accepts_canonical_workbook_with_one_row_and_headers(self):
         with TemporaryDirectory() as directory:
             path = self.make_workbook(directory, rows=(CANONICAL_ROW,))
@@ -98,6 +121,16 @@ class FinanceiroMedicaoWorkbookTests(unittest.TestCase):
 
             with self.assertRaisesRegex(WorkbookInvalid, "per[ií]odo"):
                 validate_workbook(path, date(2026, 7, 11), date(2026, 7, 31))
+
+    def test_rejects_missing_or_invalid_fim_data(self):
+        for fim_data in (None, "2026-07-15"):
+            row = list(CANONICAL_ROW)
+            row[9] = fim_data
+            with self.subTest(fim_data=fim_data), TemporaryDirectory() as directory:
+                path = self.make_workbook(directory, rows=(row,))
+
+                with self.assertRaises(WorkbookInvalid):
+                    validate_workbook(path, date(2026, 7, 11), date(2026, 7, 31))
 
     def test_rejects_wrong_headers(self):
         headers = list(REQUIRED_HEADERS)
@@ -145,6 +178,24 @@ class FinanceiroMedicaoWorkbookTests(unittest.TestCase):
 
             with self.assertRaises(WorkbookInvalid):
                 validate_workbook(malformed_path, date(2026, 7, 11), date(2026, 7, 31))
+
+    def test_rejects_xlsx_with_corrupted_deflate_payload(self):
+        with TemporaryDirectory() as directory:
+            valid_path = self.make_workbook(directory, rows=(CANONICAL_ROW,))
+            corrupted_path = Path(directory) / "corrupted.xlsx"
+            self.patch_zip_entry(valid_path, corrupted_path, "[Content_Types].xml", corrupt_payload=True)
+
+            with self.assertRaises(WorkbookInvalid):
+                validate_workbook(corrupted_path, date(2026, 7, 11), date(2026, 7, 31))
+
+    def test_rejects_xlsx_with_encrypted_entry(self):
+        with TemporaryDirectory() as directory:
+            valid_path = self.make_workbook(directory, rows=(CANONICAL_ROW,))
+            encrypted_path = Path(directory) / "encrypted.xlsx"
+            self.patch_zip_entry(valid_path, encrypted_path, "[Content_Types].xml", encrypted=True)
+
+            with self.assertRaises(WorkbookInvalid):
+                validate_workbook(encrypted_path, date(2026, 7, 11), date(2026, 7, 31))
 
     def test_rejects_zip_with_duplicate_entries(self):
         with TemporaryDirectory() as directory:
