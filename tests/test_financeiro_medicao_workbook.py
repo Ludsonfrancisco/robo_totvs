@@ -2,6 +2,7 @@ from datetime import date, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+import warnings
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from openpyxl import Workbook
@@ -50,6 +51,14 @@ class FinanceiroMedicaoWorkbookTests(unittest.TestCase):
         workbook.save(path)
         workbook.close()
         return path
+
+    def rewrite_xlsx(self, source_path, target_path, replacements=(), extra_entries=()):
+        replacements = dict(replacements)
+        with ZipFile(source_path) as source, ZipFile(target_path, "w", ZIP_DEFLATED) as target:
+            for entry in source.infolist():
+                target.writestr(entry, replacements.get(entry.filename, source.read(entry.filename)))
+            for name, content in extra_entries:
+                target.writestr(name, content)
 
     def test_accepts_canonical_workbook_with_one_row_and_headers(self):
         with TemporaryDirectory() as directory:
@@ -108,13 +117,62 @@ class FinanceiroMedicaoWorkbookTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             valid_path = self.make_workbook(directory, rows=(CANONICAL_ROW,))
             malformed_path = Path(directory) / "malformed.xlsx"
-            with ZipFile(valid_path) as source, ZipFile(malformed_path, "w", ZIP_DEFLATED) as target:
-                for entry in source.infolist():
-                    content = b"<workbook>" if entry.filename == "xl/workbook.xml" else source.read(entry.filename)
-                    target.writestr(entry, content)
+            self.rewrite_xlsx(valid_path, malformed_path, {"xl/workbook.xml": b"<workbook>"})
 
             with self.assertRaises(WorkbookInvalid):
                 validate_workbook(malformed_path, date(2026, 7, 11), date(2026, 7, 31))
+
+    def test_rejects_xlsx_with_semantically_invalid_xml(self):
+        with TemporaryDirectory() as directory:
+            valid_path = self.make_workbook(directory, rows=(CANONICAL_ROW,))
+            malformed_path = Path(directory) / "invalid-sheet-id.xlsx"
+            with ZipFile(valid_path) as source:
+                workbook_xml = source.read("xl/workbook.xml").replace(b'sheetId="1"', b'sheetId="invalid"')
+            self.rewrite_xlsx(valid_path, malformed_path, {"xl/workbook.xml": workbook_xml})
+
+            with self.assertRaises(WorkbookInvalid):
+                validate_workbook(malformed_path, date(2026, 7, 11), date(2026, 7, 31))
+
+    def test_rejects_zip_with_duplicate_entries(self):
+        with TemporaryDirectory() as directory:
+            path = self.make_workbook(directory, rows=(CANONICAL_ROW,))
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                with ZipFile(path, "a", ZIP_DEFLATED) as archive:
+                    archive.writestr("xl/workbook.xml", archive.read("xl/workbook.xml"))
+
+            with self.assertRaises(WorkbookInvalid):
+                validate_workbook(path, date(2026, 7, 11), date(2026, 7, 31))
+
+    def test_rejects_zip_with_abusive_compression_ratio(self):
+        with TemporaryDirectory() as directory:
+            valid_path = self.make_workbook(directory, rows=(CANONICAL_ROW,))
+            path = Path(directory) / "compressed.xlsx"
+            self.rewrite_xlsx(valid_path, path, extra_entries=(("xl/extra.xml", b"0" * 8192),))
+
+            with self.assertRaises(WorkbookInvalid):
+                validate_workbook(path, date(2026, 7, 11), date(2026, 7, 31))
+
+    def test_releases_file_after_success_and_load_failure(self):
+        with TemporaryDirectory() as directory:
+            valid_path = self.make_workbook(directory, rows=(CANONICAL_ROW,))
+            validate_workbook(valid_path, date(2026, 7, 11), date(2026, 7, 31))
+            renamed_path = valid_path.with_name("renamed.xlsx")
+            valid_path.replace(renamed_path)
+            renamed_path.unlink()
+
+            source_path = self.make_workbook(directory, rows=(CANONICAL_ROW,))
+            malformed_path = Path(directory) / "malformed.xlsx"
+            self.rewrite_xlsx(source_path, malformed_path, {"xl/workbook.xml": b"<workbook>"})
+            with self.assertRaises(WorkbookInvalid):
+                validate_workbook(malformed_path, date(2026, 7, 11), date(2026, 7, 31))
+            malformed_path.unlink()
+
+            iteration_path = Path(directory) / "malformed-sheet.xlsx"
+            self.rewrite_xlsx(source_path, iteration_path, {"xl/worksheets/sheet1.xml": b"<worksheet>"})
+            with self.assertRaises(WorkbookInvalid):
+                validate_workbook(iteration_path, date(2026, 7, 11), date(2026, 7, 31))
+            iteration_path.unlink()
 
     def test_rejects_inverted_query_period(self):
         with TemporaryDirectory() as directory:
