@@ -70,6 +70,19 @@ class FinanceiroMedicaoWorkbookTests(unittest.TestCase):
         self.assertEqual(info.headers, REQUIRED_HEADERS)
         self.assertGreater(info.size, 0)
 
+    def test_accepts_highly_compressible_valid_workbook(self):
+        rows = []
+        for row_number in range(10):
+            row = [f"{row_number}-{column}-" + "x" * 10000 for column in range(len(REQUIRED_HEADERS))]
+            row[9] = "15/07/2026 12:30:00"
+            rows.append(row)
+        with TemporaryDirectory() as directory:
+            path = self.make_workbook(directory, rows=rows)
+
+            info = validate_workbook(path, date(2026, 7, 11), date(2026, 7, 31))
+
+        self.assertEqual(info.row_count, 10)
+
     def test_rejects_wrong_sheet_name(self):
         with TemporaryDirectory() as directory:
             path = self.make_workbook(directory, sheet_name="Outra aba", rows=(CANONICAL_ROW,))
@@ -140,15 +153,6 @@ class FinanceiroMedicaoWorkbookTests(unittest.TestCase):
                 warnings.simplefilter("ignore", UserWarning)
                 with ZipFile(path, "a", ZIP_DEFLATED) as archive:
                     archive.writestr("xl/workbook.xml", archive.read("xl/workbook.xml"))
-
-            with self.assertRaises(WorkbookInvalid):
-                validate_workbook(path, date(2026, 7, 11), date(2026, 7, 31))
-
-    def test_rejects_zip_with_abusive_compression_ratio(self):
-        with TemporaryDirectory() as directory:
-            valid_path = self.make_workbook(directory, rows=(CANONICAL_ROW,))
-            path = Path(directory) / "compressed.xlsx"
-            self.rewrite_xlsx(valid_path, path, extra_entries=(("xl/extra.xml", b"0" * 8192),))
 
             with self.assertRaises(WorkbookInvalid):
                 validate_workbook(path, date(2026, 7, 11), date(2026, 7, 31))

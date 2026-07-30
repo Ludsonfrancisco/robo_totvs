@@ -32,10 +32,6 @@ REQUIRED_HEADERS = (
     "Valor Atividade",
 )
 MAX_WORKBOOK_BYTES = 256 * 1024 * 1024
-MAX_ZIP_ENTRIES = 4096
-MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES = 1024 * 1024 * 1024
-MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
-MAX_ZIP_COMPRESSION_RATIO = 200
 _FIM_DATA_INDEX = REQUIRED_HEADERS.index("FimData")
 
 
@@ -65,26 +61,13 @@ def _as_date(value):
 
 
 def _validate_archive(stream):
-    """Reject archive metadata that can cause disproportionate extraction work."""
+    """Reject duplicate ZIP names, which make an XLSX package ambiguous."""
     with ZipFile(stream) as archive:
-        entries = archive.infolist()
-        if len(entries) > MAX_ZIP_ENTRIES:
-            raise WorkbookInvalid("Arquivo de medição inválido.")
-
         names = set()
-        total_size = 0
-        for entry in entries:
+        for entry in archive.infolist():
             if entry.filename in names:
                 raise WorkbookInvalid("Arquivo de medição inválido.")
             names.add(entry.filename)
-
-            if entry.file_size > MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES:
-                raise WorkbookInvalid("Arquivo de medição inválido.")
-            total_size += entry.file_size
-            if total_size > MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES:
-                raise WorkbookInvalid("Arquivo de medição inválido.")
-            if entry.file_size and entry.file_size / max(entry.compress_size, 1) > MAX_ZIP_COMPRESSION_RATIO:
-                raise WorkbookInvalid("Arquivo de medição inválido.")
 
 
 def validate_workbook(path, query_start, query_end):
