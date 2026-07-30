@@ -195,17 +195,40 @@ class FinanceiroMedicaoBrowserTests(unittest.TestCase):
         )
 
     def test_authentication_requires_title_path_and_no_password(self):
+        with TemporaryDirectory() as temp_dir:
+            settings = self._settings(
+                Path(temp_dir) / "financeiro_medicao"
+            )
         page = _Page(authenticated=True)
-        self.assertTrue(_is_authenticated(page))
+        self.assertTrue(_is_authenticated(page, settings))
 
         page.url = "https://dashboard.loga.net.br/outra-rota"
-        self.assertFalse(_is_authenticated(page))
+        self.assertFalse(_is_authenticated(page, settings))
         page.url = "https://dashboard.loga.net.br/medicao_pagamento"
         page.current_title = "Outro título"
-        self.assertFalse(_is_authenticated(page))
+        self.assertFalse(_is_authenticated(page, settings))
         page.current_title = AUTH_TITLE
         page.password_inputs = 1
-        self.assertFalse(_is_authenticated(page))
+        self.assertFalse(_is_authenticated(page, settings))
+        page.password_inputs = 0
+        page.url = "https://malicioso.invalid/medicao_pagamento"
+        self.assertFalse(_is_authenticated(page, settings))
+
+    def test_authentication_accepts_normalized_configured_path(self):
+        with TemporaryDirectory() as temp_dir:
+            runtime_root = Path(temp_dir) / "financeiro_medicao"
+            settings = Settings.from_mapping(
+                {
+                    "FINANCEIRO_MEDICAO_LOGA_URL": (
+                        "https://dashboard.loga.net.br/"
+                        "medicao_pagamento/"
+                    ),
+                    "FINANCEIRO_MEDICAO_RUNTIME_ROOT": str(runtime_root),
+                }
+            )
+            page = _Page(authenticated=True)
+
+            self.assertTrue(_is_authenticated(page, settings))
 
     def test_valid_session_does_not_fill_credentials_or_save_state(self):
         with TemporaryDirectory() as temp_dir:
@@ -219,7 +242,14 @@ class FinanceiroMedicaoBrowserTests(unittest.TestCase):
             self.assertEqual(page.login_clicks, 0)
             self.assertEqual(context.saved_paths, [])
 
-    def test_expired_session_uses_settings_and_saves_isolated_state(self):
+    @patch(
+        "flows.financeiro_medicao.browser._is_posix_runtime",
+        return_value=True,
+    )
+    def test_expired_session_uses_settings_and_saves_isolated_state(
+        self,
+        _posix_runtime,
+    ):
         with TemporaryDirectory() as temp_dir:
             runtime_root = Path(temp_dir) / "financeiro_medicao"
             (runtime_root / "runtime").mkdir(parents=True)
@@ -281,7 +311,14 @@ class FinanceiroMedicaoBrowserTests(unittest.TestCase):
                     0o600,
                 )
 
-    def test_storage_state_temp_is_exclusive_and_restricted_before_write(self):
+    @patch(
+        "flows.financeiro_medicao.browser._is_posix_runtime",
+        return_value=True,
+    )
+    def test_storage_state_temp_is_exclusive_and_restricted_before_write(
+        self,
+        _posix_runtime,
+    ):
         with TemporaryDirectory() as temp_dir:
             directory = Path(temp_dir)
             destination = directory / "loga-storage-state.json"
@@ -325,13 +362,22 @@ class FinanceiroMedicaoBrowserTests(unittest.TestCase):
             self.assertFalse(temporary.exists())
             self.assertTrue(destination.is_file())
 
-    def test_storage_state_failure_preserves_final_and_removes_uuid_temp(self):
+    @patch(
+        "flows.financeiro_medicao.browser._is_posix_runtime",
+        return_value=True,
+    )
+    def test_storage_state_failure_preserves_final_and_removes_uuid_temp(
+        self,
+        _posix_runtime,
+    ):
         with TemporaryDirectory() as temp_dir:
             destination = Path(temp_dir) / "loga-storage-state.json"
             destination.write_bytes(b"original")
             context = _Context(storage_error=True)
 
-            with self.assertRaisesRegex(RuntimeError, "storage"):
+            with self.assertRaisesRegex(
+                CollectionError, "AUTH_STATE_FAILED"
+            ):
                 _save_storage_state(context, destination)
 
             self.assertEqual(destination.read_bytes(), b"original")
@@ -340,6 +386,98 @@ class FinanceiroMedicaoBrowserTests(unittest.TestCase):
             self.assertNotEqual(temporary, destination)
             self.assertFalse(temporary.exists())
             self.assertEqual(list(destination.parent.iterdir()), [destination])
+
+    def test_non_posix_runtime_refuses_before_browser_or_state_write(self):
+        with TemporaryDirectory() as temp_dir:
+            runtime_root = Path(temp_dir) / "financeiro_medicao"
+            (runtime_root / "runtime").mkdir(parents=True)
+            settings = self._settings(runtime_root)
+            context = _Context()
+
+            with (
+                patch(
+                    "flows.financeiro_medicao.browser._is_posix_runtime",
+                    return_value=False,
+                ),
+                patch(
+                    "flows.financeiro_medicao.browser.sync_playwright"
+                ) as playwright,
+            ):
+                with self.assertRaisesRegex(
+                    CollectionError, "UNSUPPORTED_PLATFORM"
+                ):
+                    with authenticated_page(settings):
+                        self.fail("browser não deve abrir fora de POSIX")
+                with self.assertRaisesRegex(
+                    CollectionError, "UNSUPPORTED_PLATFORM"
+                ):
+                    _save_storage_state(
+                        context,
+                        settings.storage_state_path,
+                    )
+
+            playwright.assert_not_called()
+            self.assertEqual(context.saved_paths, [])
+            self.assertEqual(
+                list(settings.storage_state_path.parent.iterdir()),
+                [],
+            )
+
+    @patch(
+        "flows.financeiro_medicao.browser._is_posix_runtime",
+        return_value=True,
+    )
+    def test_storage_cleanup_failure_is_sanitized_and_preserves_primary(
+        self,
+        _posix_runtime,
+    ):
+        with TemporaryDirectory() as temp_dir:
+            destination = Path(temp_dir) / "loga-storage-state.json"
+            context = _Context(storage_error=True)
+
+            with patch.object(
+                Path,
+                "unlink",
+                side_effect=PermissionError("caminho sensível"),
+            ) as unlink:
+                with self.assertRaises(CollectionError) as raised:
+                    _save_storage_state(context, destination)
+
+            self.assertEqual(raised.exception.code, "AUTH_STATE_FAILED")
+            self.assertEqual(
+                raised.exception.__cause__.code,
+                "AUTH_STATE_CLEANUP_FAILED",
+            )
+            self.assertEqual(str(raised.exception), "AUTH_STATE_FAILED")
+            self.assertEqual(unlink.call_count, 3)
+            context.saved_paths[0].unlink()
+
+    @patch(
+        "flows.financeiro_medicao.browser._is_posix_runtime",
+        return_value=True,
+    )
+    def test_storage_collision_never_cleans_file_not_created_by_process(
+        self,
+        _posix_runtime,
+    ):
+        with TemporaryDirectory() as temp_dir:
+            destination = Path(temp_dir) / "loga-storage-state.json"
+            temporary = destination.with_name(
+                ".loga-storage-state.json.fixed.tmp"
+            )
+            temporary.write_bytes(b"preexistente")
+
+            with patch(
+                "flows.financeiro_medicao.browser.uuid4",
+                return_value=SimpleNamespace(hex="fixed"),
+            ):
+                with self.assertRaisesRegex(
+                    CollectionError, "AUTH_STATE_FAILED"
+                ):
+                    _save_storage_state(_Context(), destination)
+
+            self.assertEqual(temporary.read_bytes(), b"preexistente")
+            self.assertFalse(destination.exists())
 
     def test_missing_credentials_form_or_rejection_maps_to_auth_expired(self):
         cases = (
@@ -374,7 +512,14 @@ class FinanceiroMedicaoBrowserTests(unittest.TestCase):
                     self.assertEqual(raised.exception.code, "AUTH_EXPIRED")
                     self.assertFalse(settings.storage_state_path.exists())
 
-    def test_authenticated_page_uses_chrome_and_exclusive_state_then_closes(self):
+    @patch(
+        "flows.financeiro_medicao.browser._is_posix_runtime",
+        return_value=True,
+    )
+    def test_authenticated_page_uses_chrome_and_exclusive_state_then_closes(
+        self,
+        _posix_runtime,
+    ):
         with TemporaryDirectory() as temp_dir:
             runtime_root = Path(temp_dir) / "financeiro_medicao"
             (runtime_root / "runtime").mkdir(parents=True)
@@ -405,7 +550,14 @@ class FinanceiroMedicaoBrowserTests(unittest.TestCase):
             self.assertTrue(browser.context.closed)
             self.assertTrue(browser.closed)
 
-    def test_authenticated_page_closes_resources_when_consumer_fails(self):
+    @patch(
+        "flows.financeiro_medicao.browser._is_posix_runtime",
+        return_value=True,
+    )
+    def test_authenticated_page_closes_resources_when_consumer_fails(
+        self,
+        _posix_runtime,
+    ):
         with TemporaryDirectory() as temp_dir:
             runtime_root = Path(temp_dir) / "financeiro_medicao"
             (runtime_root / "runtime").mkdir(parents=True)
@@ -427,7 +579,14 @@ class FinanceiroMedicaoBrowserTests(unittest.TestCase):
             self.assertTrue(browser.context.closed)
             self.assertTrue(browser.closed)
 
-    def test_authenticated_page_closes_browser_when_context_creation_fails(self):
+    @patch(
+        "flows.financeiro_medicao.browser._is_posix_runtime",
+        return_value=True,
+    )
+    def test_authenticated_page_closes_browser_when_context_creation_fails(
+        self,
+        _posix_runtime,
+    ):
         with TemporaryDirectory() as temp_dir:
             runtime_root = Path(temp_dir) / "financeiro_medicao"
             (runtime_root / "runtime").mkdir(parents=True)

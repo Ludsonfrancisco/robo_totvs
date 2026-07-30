@@ -1,5 +1,6 @@
 from datetime import date
 from html.parser import HTMLParser
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -66,7 +67,12 @@ class _Locator:
         self.visible = visible
         self.wait_calls = []
 
+    def _raise_timeout(self, action):
+        if self.page.timeout_at == (action, self.name):
+            raise PlaywrightTimeoutError("timeout simulado")
+
     def count(self):
+        self._raise_timeout("count")
         if self.name == 'input[type="password"]':
             return self.page.password_inputs
         if self.name == "Calculando medição...":
@@ -74,23 +80,29 @@ class _Locator:
         return 1
 
     def is_visible(self):
+        self._raise_timeout("is_visible")
         return self.visible
 
     def fill(self, value):
+        self._raise_timeout("fill")
         self.value = value
 
     def select_option(self, *, value):
+        self._raise_timeout("select_option")
         self.value = value
 
     def input_value(self):
+        self._raise_timeout("input_value")
         if self.page.mismatched_control == self.name:
             return "valor-incorreto"
         return self.value
 
     def wait_for(self, **kwargs):
+        self._raise_timeout("wait_for")
         self.wait_calls.append(kwargs)
 
     def click(self):
+        self._raise_timeout("click")
         self.page.clicks.append(self.name)
         if self.name == "Filtros":
             self.page.controls["#dti"].visible = True
@@ -104,15 +116,19 @@ class _Download:
         fails=False,
         omit=False,
         competing_destination=None,
+        timeout=False,
     ):
         self.payload = payload
         self.fails = fails
         self.omit = omit
         self.competing_destination = competing_destination
+        self.timeout = timeout
         self.saved_to = None
 
     def save_as(self, destination):
         self.saved_to = Path(destination)
+        if self.timeout:
+            raise PlaywrightTimeoutError("timeout simulado")
         if self.fails:
             raise RuntimeError("falha simulada sem dados sensíveis")
         if not self.omit:
@@ -140,6 +156,7 @@ class _Page:
         self,
         *,
         title="Medição de Pagamento à Terceiros",
+        url="https://dashboard.loga.net.br/medicao_pagamento",
         password_inputs=0,
         dates_visible=False,
         mismatched_control=None,
@@ -147,14 +164,17 @@ class _Page:
         download=None,
         download_timeout=False,
         has_dialog=True,
+        timeout_at=None,
     ):
         self.current_title = title
+        self.url = url
         self.password_inputs = password_inputs
         self.mismatched_control = mismatched_control
         self.navigation_timeout = navigation_timeout
         self.download = download or _Download()
         self.download_timeout = download_timeout
         self.has_dialog = has_dialog
+        self.timeout_at = timeout_at
         self.goto_calls = []
         self.clicks = []
         self.role_calls = []
@@ -358,6 +378,9 @@ class FinanceiroMedicaoCollectionTests(unittest.TestCase):
         for page in (
             _Page(title="Dashboard - Loga Internet"),
             _Page(password_inputs=1),
+            _Page(
+                url="https://malicioso.invalid/medicao_pagamento",
+            ),
         ):
             with self.subTest(title=page.current_title):
                 with TemporaryDirectory() as temp_dir:
@@ -370,6 +393,28 @@ class FinanceiroMedicaoCollectionTests(unittest.TestCase):
                             _Settings(),
                             Path(temp_dir) / "medicao.xlsx",
                         )
+
+    def test_configured_origin_and_normalized_path_are_required(self):
+        class TrailingSlashSettings:
+            loga_url = (
+                "https://dashboard.loga.net.br/medicao_pagamento/"
+            )
+
+        with TemporaryDirectory() as temp_dir:
+            destination = Path(temp_dir) / "medicao.xlsx"
+            result = collect(
+                _Page(
+                    url=(
+                        "https://dashboard.loga.net.br/"
+                        "medicao_pagamento"
+                    )
+                ),
+                window_for(date(2026, 7, 30)),
+                TrailingSlashSettings(),
+                destination,
+            )
+
+        self.assertEqual(result, destination)
 
     def test_navigation_timeout_has_specific_code(self):
         with TemporaryDirectory() as temp_dir:
@@ -396,6 +441,58 @@ class FinanceiroMedicaoCollectionTests(unittest.TestCase):
                     Path(temp_dir) / "medicao.xlsx",
                 )
         self.assertEqual(raised.exception.code, "DOWNLOAD_TIMEOUT")
+
+    def test_all_interaction_timeouts_map_to_navigation_timeout(self):
+        timeout_points = (
+            ("is_visible", "#dti"),
+            ("click", "Filtros"),
+            ("select_option", "#modoCalculo"),
+            ("fill", "#dti"),
+            ("click", "Pesquisar"),
+            ("wait_for", "Calculando medição..."),
+            ("input_value", "#tipoAgrupamento"),
+        )
+        for timeout_at in timeout_points:
+            with self.subTest(timeout_at=timeout_at):
+                with TemporaryDirectory() as temp_dir:
+                    with self.assertRaisesRegex(
+                        CollectionError, "NAVIGATION_TIMEOUT"
+                    ) as raised:
+                        collect(
+                            _Page(timeout_at=timeout_at),
+                            window_for(date(2026, 7, 30)),
+                            _Settings(),
+                            Path(temp_dir) / "medicao.xlsx",
+                        )
+                self.assertEqual(
+                    raised.exception.code,
+                    "NAVIGATION_TIMEOUT",
+                )
+
+    def test_export_click_and_save_timeouts_map_to_download_timeout(self):
+        pages = (
+            _Page(timeout_at=("click", "Exportar Atendimentos")),
+            _Page(download=_Download(timeout=True)),
+        )
+        for page in pages:
+            with self.subTest(
+                click_timeout=page.timeout_at is not None,
+                save_timeout=page.download.timeout,
+            ):
+                with TemporaryDirectory() as temp_dir:
+                    with self.assertRaisesRegex(
+                        CollectionError, "DOWNLOAD_TIMEOUT"
+                    ) as raised:
+                        collect(
+                            page,
+                            window_for(date(2026, 7, 30)),
+                            _Settings(),
+                            Path(temp_dir) / "medicao.xlsx",
+                        )
+                    self.assertEqual(
+                        raised.exception.code,
+                        "DOWNLOAD_TIMEOUT",
+                    )
 
     def test_failed_missing_or_empty_download_is_rejected(self):
         cases = (
@@ -482,6 +579,73 @@ class FinanceiroMedicaoCollectionTests(unittest.TestCase):
             self.assertFalse(destination.exists())
             self.assertIsNotNone(download.saved_to)
             self.assertFalse(download.saved_to.exists())
+            self.assertEqual(list(destination.parent.iterdir()), [])
+
+    def test_cleanup_failure_retries_and_prevents_success(self):
+        cases = (
+            (_Download(), "DOWNLOAD_FAILED"),
+            (_Download(timeout=True), "DOWNLOAD_TIMEOUT"),
+        )
+        for download, expected_code in cases:
+            with self.subTest(expected_code=expected_code):
+                with TemporaryDirectory() as temp_dir:
+                    destination = Path(temp_dir) / "medicao.xlsx"
+                    with patch.object(
+                        Path,
+                        "unlink",
+                        side_effect=PermissionError(
+                            "caminho sensível"
+                        ),
+                    ) as unlink:
+                        with self.assertRaises(
+                            CollectionError
+                        ) as raised:
+                            collect(
+                                _Page(download=download),
+                                window_for(date(2026, 7, 30)),
+                                _Settings(),
+                                destination,
+                            )
+
+                    self.assertEqual(
+                        raised.exception.code,
+                        expected_code,
+                    )
+                    self.assertEqual(
+                        raised.exception.__cause__.code,
+                        "DOWNLOAD_TEMP_CLEANUP_FAILED",
+                    )
+                    self.assertEqual(
+                        str(raised.exception),
+                        expected_code,
+                    )
+                    self.assertEqual(unlink.call_count, 3)
+                    download.saved_to.unlink()
+
+    def test_descriptor_close_failure_cleans_owned_download_temp(self):
+        with TemporaryDirectory() as temp_dir:
+            destination = Path(temp_dir) / "medicao.xlsx"
+            real_close = os.close
+
+            def close_then_fail(descriptor):
+                real_close(descriptor)
+                raise OSError("close failure")
+
+            with patch(
+                "flows.financeiro_medicao.loga.os.close",
+                side_effect=close_then_fail,
+            ):
+                with self.assertRaisesRegex(
+                    CollectionError, "DOWNLOAD_FAILED"
+                ):
+                    collect(
+                        _Page(),
+                        window_for(date(2026, 7, 30)),
+                        _Settings(),
+                        destination,
+                    )
+
+            self.assertFalse(destination.exists())
             self.assertEqual(list(destination.parent.iterdir()), [])
 
     def test_missing_destination_parent_is_rejected(self):
