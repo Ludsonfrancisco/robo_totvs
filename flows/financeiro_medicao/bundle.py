@@ -148,7 +148,7 @@ def build_bundle(*, runtime_root: Path, source: Path, window: CycleWindow,
         try:
             _fsync_directory(inbox_dir)
             _fsync_directory(runtime_dir)
-        except BaseException as error:
+        except Exception as error:
             raise BundleDurabilityError(published_dir) from error
         return published_dir
     except BaseException:

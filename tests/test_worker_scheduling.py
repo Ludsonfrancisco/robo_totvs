@@ -1,11 +1,13 @@
 from datetime import datetime
 from contextlib import contextmanager
+import json
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
 import worker
+from flows.common.locks import LockUnavailable
 from flows.multiplica import runner as multiplica_runner
 
 
@@ -65,7 +67,14 @@ class WorkerSchedulingTests(unittest.TestCase):
         self.assertTrue(consumed)
         run_once.assert_called_once_with()
 
-    def test_multiplica_dispatch_is_not_wrapped_in_worker_lock(self):
+    def test_multiplica_dispatch_uses_only_signal_claim_lock(self):
+        locked_paths = []
+
+        @contextmanager
+        def recording_lock(path, *, wait_seconds):
+            locked_paths.append((Path(path), wait_seconds))
+            yield
+
         with tempfile.TemporaryDirectory() as tmp:
             signal_file = Path(tmp) / "multiplica.signal"
             signal_file.touch()
@@ -74,12 +83,22 @@ class WorkerSchedulingTests(unittest.TestCase):
             ), patch.object(
                 multiplica_runner, "run_once"
             ) as run_once, patch.object(
-                worker, "file_lock"
-            ) as worker_lock:
+                worker, "file_lock", side_effect=recording_lock
+            ):
                 worker._run_multiplica_signal_if_present()
 
         run_once.assert_called_once_with()
-        worker_lock.assert_not_called()
+        self.assertEqual(
+            locked_paths,
+            [
+                (
+                    signal_file.parent
+                    / ".multiplica.signal.claim.lock",
+                    0,
+                )
+            ],
+        )
+        self.assertNotEqual(locked_paths[0][0], worker.GLOBAL_CHROMIUM_LOCK)
 
     def test_multiplica_signal_is_preserved_when_global_lock_is_busy(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -102,7 +121,87 @@ class WorkerSchedulingTests(unittest.TestCase):
                 list(signal_file.parent.glob("*.claimed.*")),
                 [],
             )
-        worker_lock.assert_not_called()
+        worker_lock.assert_called_once_with(
+            signal_file.parent / ".multiplica.signal.claim.lock",
+            wait_seconds=0,
+        )
+
+    def test_active_multiplica_claim_is_not_recovered_by_other_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            signal_file = root / "multiplica.signal"
+            active_claim = root / (
+                ".multiplica.signal.claimed."
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            )
+            active_claim.touch()
+            with patch.object(
+                worker, "MULTIPLICA_SIGNAL_FILE", signal_file
+            ), patch.object(
+                worker,
+                "file_lock",
+                side_effect=LockUnavailable("LOCKED"),
+            ), patch.object(
+                multiplica_runner, "run_once"
+            ) as run_once:
+                consumed = worker._run_multiplica_signal_if_present()
+
+            self.assertFalse(consumed)
+            self.assertTrue(active_claim.exists())
+            self.assertFalse(signal_file.exists())
+            run_once.assert_not_called()
+
+    def test_orphaned_multiplica_claim_is_recovered_after_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            signal_file = root / "multiplica.signal"
+            orphan = root / (
+                ".multiplica.signal.claimed."
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            )
+            unrelated = root / ".multiplica.signal.claimed.not-ours"
+            orphan.touch()
+            unrelated.touch()
+            with patch.object(
+                worker, "MULTIPLICA_SIGNAL_FILE", signal_file
+            ), patch.object(
+                multiplica_runner,
+                "run_once",
+                side_effect=multiplica_runner.AlreadyRunning("busy"),
+            ):
+                consumed = worker._run_multiplica_signal_if_present()
+
+            self.assertFalse(consumed)
+            self.assertTrue(signal_file.exists())
+            self.assertFalse(orphan.exists())
+            self.assertTrue(unrelated.exists())
+
+    def test_orphaned_claim_is_removed_when_signal_already_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            signal_file = root / "multiplica.signal"
+            orphan = root / (
+                ".multiplica.signal.claimed."
+                "cccccccccccccccccccccccccccccccc"
+            )
+            unrelated = root / ".multiplica.signal.claimed.not-ours"
+            signal_file.touch()
+            orphan.touch()
+            unrelated.touch()
+            with patch.object(
+                worker, "MULTIPLICA_SIGNAL_FILE", signal_file
+            ), patch.object(
+                multiplica_runner, "run_once"
+            ) as run_once:
+                first = worker._run_multiplica_signal_if_present()
+                second = worker._run_multiplica_signal_if_present()
+
+            self.assertTrue(first)
+            self.assertFalse(second)
+            self.assertFalse(signal_file.exists())
+            self.assertFalse(orphan.exists())
+            self.assertTrue(unrelated.exists())
+            run_once.assert_called_once_with()
 
     def test_scheduled_multiplica_collision_creates_retry_signal(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -159,6 +258,65 @@ class WorkerSchedulingTests(unittest.TestCase):
                 ),
             ],
         )
+
+    def test_protheus_lock_contention_propagates_typed_locked(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(
+            worker, "LOG_FILE", Path(temporary) / "run.log"
+        ), patch.object(
+            worker,
+            "file_lock",
+            side_effect=LockUnavailable("LOCKED"),
+        ), patch("main.main") as robot_main:
+            with self.assertRaises(LockUnavailable):
+                worker._executar_robo("full")
+
+        robot_main.assert_not_called()
+
+    def test_protheus_lock_contention_requeues_without_auto_retry_delay(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            signal_file = Path(temporary) / "run.signal"
+            with patch.object(
+                worker, "SIGNAL_FILE", signal_file
+            ), patch.object(
+                worker,
+                "_run_once",
+                side_effect=LockUnavailable("LOCKED"),
+            ), patch.object(worker.time, "sleep") as sleep:
+                worker._run_with_auto_retry("retry-falhos")
+
+            self.assertEqual(
+                json.loads(signal_file.read_text(encoding="utf-8")),
+                {"mode": "retry-falhos"},
+            )
+            sleep.assert_called_once_with(worker.POLL_INTERVAL_S)
+
+    def test_protheus_requeue_preserves_stronger_concurrent_signal(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            signal_file = Path(temporary) / "run.signal"
+            original = '{"mode":"full","request":"concurrent"}\n'
+            signal_file.write_text(original, encoding="utf-8")
+            with patch.object(worker, "SIGNAL_FILE", signal_file):
+                worker._request_protheus_retry("retry-falhos")
+
+            self.assertEqual(
+                signal_file.read_text(encoding="utf-8"),
+                original,
+            )
+
+    def test_protheus_requeue_upgrades_retry_signal_to_full(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            signal_file = Path(temporary) / "run.signal"
+            signal_file.write_text(
+                '{"mode":"retry-falhos"}\n',
+                encoding="utf-8",
+            )
+            with patch.object(worker, "SIGNAL_FILE", signal_file):
+                worker._request_protheus_retry("scheduled")
+
+            self.assertEqual(
+                json.loads(signal_file.read_text(encoding="utf-8")),
+                {"mode": "full"},
+            )
 
     def test_routerbox_browser_entrypoint_uses_global_lock(self):
         events = []

@@ -303,6 +303,32 @@ class FinanceiroMedicaoBundleTests(unittest.TestCase):
             self.assertTrue((packages[0] / "manifest.json").is_file())
             self.assertEqual(list((root / "runtime").iterdir()), [])
 
+    def test_post_replace_sync_does_not_absorb_termination_signals(self):
+        for termination in (KeyboardInterrupt(), SystemExit(23)):
+            with self.subTest(termination=type(termination).__name__):
+                with TemporaryDirectory() as directory:
+                    root = Path(directory) / "financeiro_medicao"
+                    (root / "runtime").mkdir(parents=True)
+                    (root / "inbox").mkdir()
+                    calls = 0
+
+                    def interrupt_after_replace(_path):
+                        nonlocal calls
+                        calls += 1
+                        if calls == 3:
+                            raise termination
+
+                    with patch(
+                        "flows.financeiro_medicao.bundle._fsync_directory",
+                        side_effect=interrupt_after_replace,
+                    ), self.assertRaises(type(termination)) as raised:
+                        self.build(root, self.make_workbook(directory))
+
+                    packages = list((root / "inbox").iterdir())
+                    self.assertEqual(len(packages), 1)
+                    if isinstance(termination, SystemExit):
+                        self.assertEqual(raised.exception.code, 23)
+
     def test_workbook_copy_write_failure_cleans_temp_and_preserves_outside_file(self):
         with TemporaryDirectory() as directory:
             root = Path(directory) / "financeiro_medicao"

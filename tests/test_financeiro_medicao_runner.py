@@ -196,6 +196,33 @@ class FinanceiroMedicaoRunnerTests(unittest.TestCase):
         self.assertEqual(payload["run_id"], "durable-run-123")
         self.assertEqual(builder.call_count, 1)
 
+    def test_cleanup_failure_preserves_published_run_id_from_cause(self):
+        def collector(_page, _window, _settings, destination):
+            destination.write_bytes(b"xlsx")
+            return destination
+
+        published = self.runtime_root / "inbox" / "durable-run-456"
+        builder = Mock(
+            side_effect=BundleDurabilityError(published)
+        )
+
+        with patch(
+            "flows.financeiro_medicao.runner._remove_private_file",
+            side_effect=OSError("C:\\sensitive\\private.xlsx"),
+        ):
+            payload = self._run_once(
+                collector,
+                bundle_builder=builder,
+            )
+
+        self.assertEqual(
+            payload["error_code"],
+            "DOWNLOAD_TEMP_CLEANUP_FAILED",
+        )
+        self.assertEqual(payload["run_id"], "durable-run-456")
+        self.assertEqual(builder.call_count, 1)
+        self.assertNotIn("sensitive", json.dumps(payload).casefold())
+
     def test_unexpected_exception_never_reaches_status(self):
         collector = Mock(
             side_effect=RuntimeError(
@@ -240,6 +267,27 @@ class FinanceiroMedicaoRunnerTests(unittest.TestCase):
 
         self.assertEqual(len(destinations), 1)
         self.assertFalse(destinations[0].exists())
+
+    def test_cleanup_failure_never_converts_termination_signals(self):
+        for termination in (KeyboardInterrupt(), SystemExit(17)):
+            with self.subTest(termination=type(termination).__name__):
+                def collector(
+                    _page,
+                    _window,
+                    _settings,
+                    destination,
+                ):
+                    destination.write_bytes(b"private workbook")
+                    raise termination
+
+                with patch(
+                    "flows.financeiro_medicao.runner._remove_private_file",
+                    side_effect=OSError("cleanup failed"),
+                ), self.assertRaises(type(termination)) as raised:
+                    self._run_once(collector)
+
+                if isinstance(termination, SystemExit):
+                    self.assertEqual(raised.exception.code, 17)
 
     def test_lock_failure_is_sanitized_without_opening_page(self):
         page_factory = Mock()

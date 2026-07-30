@@ -91,6 +91,19 @@ def _safe_error_code(error: Exception) -> str:
     return "UNEXPECTED_ERROR"
 
 
+def _published_run_id(error: Exception) -> str | None:
+    current = error
+    visited = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        if isinstance(current, BundleDurabilityError):
+            candidate = current.published.name
+            if _RUN_ID.fullmatch(candidate):
+                return candidate
+        current = current.__cause__
+    return None
+
+
 def _next_scheduled_for(settings, moment: datetime) -> str | None:
     if getattr(settings, "schedule_enabled", False) is not True:
         return None
@@ -199,6 +212,11 @@ def _collect_bundle(
         except OSError as error:
             cleanup_error = error
 
+    if primary_error is not None and not isinstance(
+        primary_error,
+        Exception,
+    ):
+        raise primary_error
     if cleanup_error is not None:
         cleanup_failure = CollectionError(
             "DOWNLOAD_TEMP_CLEANUP_FAILED"
@@ -303,17 +321,11 @@ def run_once(
                                 error_code = ""
                                 break
                             except Exception as error:
-                                if isinstance(
-                                    error,
-                                    BundleDurabilityError,
-                                ):
-                                    candidate_run_id = (
-                                        error.published.name
-                                    )
-                                    if _RUN_ID.fullmatch(
-                                        candidate_run_id
-                                    ):
-                                        run_id = candidate_run_id
+                                published_run_id = _published_run_id(
+                                    error
+                                )
+                                if published_run_id is not None:
+                                    run_id = published_run_id
                                 error_code = _safe_error_code(error)
                                 if (
                                     error_code not in RETRYABLE_ERRORS

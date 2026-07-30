@@ -58,7 +58,7 @@ from uuid import uuid4
 
 from loguru import logger
 
-from flows.common.locks import file_lock
+from flows.common.locks import LockUnavailable, file_lock
 
 DATA_PIPELINE_DIR = Path(os.environ.get("DATA_PIPELINE_DIR", "/app/data_pipeline"))
 GLOBAL_CHROMIUM_LOCK = DATA_PIPELINE_DIR / "runtime" / "chromium.lock"
@@ -139,9 +139,20 @@ def _next_multiplica_run_at(now: datetime | None = None) -> datetime:
 
 
 def _run_multiplica_signal_if_present() -> bool:
-    if not MULTIPLICA_SIGNAL_FILE.exists():
+    claim_lock = MULTIPLICA_SIGNAL_FILE.parent / (
+        f".{MULTIPLICA_SIGNAL_FILE.name}.claim.lock"
+    )
+    try:
+        with file_lock(claim_lock, wait_seconds=0):
+            return _run_claimed_multiplica_signal()
+    except LockUnavailable:
         return False
 
+
+def _run_claimed_multiplica_signal() -> bool:
+    _reconcile_multiplica_claims()
+    if not MULTIPLICA_SIGNAL_FILE.exists():
+        return False
     claimed_signal = MULTIPLICA_SIGNAL_FILE.with_name(
         f".{MULTIPLICA_SIGNAL_FILE.name}.claimed.{uuid4().hex}"
     )
@@ -166,6 +177,30 @@ def _run_multiplica_signal_if_present() -> bool:
         raise
     claimed_signal.unlink(missing_ok=True)
     return True
+
+
+def _reconcile_multiplica_claims() -> None:
+    parent = MULTIPLICA_SIGNAL_FILE.parent
+    if not parent.exists():
+        return
+
+    prefix = f".{MULTIPLICA_SIGNAL_FILE.name}.claimed."
+    claims = []
+    for candidate in parent.iterdir():
+        suffix = candidate.name.removeprefix(prefix)
+        if (
+            candidate.is_file()
+            and candidate.name.startswith(prefix)
+            and len(suffix) == 32
+            and all(character in "0123456789abcdef" for character in suffix)
+        ):
+            claims.append(candidate)
+
+    for claim in sorted(claims, key=lambda path: path.name):
+        if MULTIPLICA_SIGNAL_FILE.exists():
+            claim.unlink(missing_ok=True)
+        else:
+            os.replace(claim, MULTIPLICA_SIGNAL_FILE)
 
 
 def _request_multiplica_retry() -> None:
@@ -220,6 +255,86 @@ def _consume_signal() -> dict | None:
     except OSError:
         pass
     return payload
+
+
+def _request_protheus_retry(mode: str) -> None:
+    retry_mode = mode if mode in {"full", "retry-falhos"} else "full"
+    SIGNAL_FILE.parent.mkdir(parents=True, exist_ok=True)
+    temporary = SIGNAL_FILE.with_name(
+        f".{SIGNAL_FILE.name}.{uuid4().hex}.tmp"
+    )
+    descriptor = None
+    created = False
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            0o600,
+        )
+        created = True
+        with os.fdopen(
+            descriptor,
+            "w",
+            encoding="utf-8",
+            newline="\n",
+        ) as stream:
+            descriptor = None
+            json.dump(
+                {"mode": retry_mode},
+                stream,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+
+        while True:
+            try:
+                raw = SIGNAL_FILE.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                existing_mode = None
+            except (OSError, ValueError):
+                existing_mode = "full"
+            else:
+                try:
+                    existing_payload = (
+                        json.loads(raw) if raw.strip() else {}
+                    )
+                    existing_mode = (
+                        "retry-falhos"
+                        if existing_payload.get("mode")
+                        == "retry-falhos"
+                        else "full"
+                    )
+                except (AttributeError, ValueError):
+                    existing_mode = "full"
+
+            if (
+                existing_mode == "full"
+                or (
+                    existing_mode == "retry-falhos"
+                    and retry_mode == "retry-falhos"
+                )
+            ):
+                return
+
+            if existing_mode is None:
+                try:
+                    os.link(temporary, SIGNAL_FILE)
+                    return
+                except FileExistsError:
+                    continue
+
+            # A full run subsumes any concurrent retry-falhos request, so
+            # replacing the weaker signal cannot discard pending work.
+            os.replace(temporary, SIGNAL_FILE)
+            return
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if created:
+            temporary.unlink(missing_ok=True)
 
 
 def _cleanup_run_artifacts() -> None:
@@ -343,6 +458,7 @@ def _executar_robo(mode: str) -> tuple[bool, str, int | None]:
     success = False
     message = ""
     exit_code: int | None = None
+    lock_error = None
 
     try:
         from main import main as robo_main
@@ -367,6 +483,9 @@ def _executar_robo(mode: str) -> tuple[bool, str, int | None]:
         exit_code = int(exc.code or 0)
         success = exit_code == 0
         message = f"sys.exit({exit_code})"
+    except LockUnavailable as exc:
+        lock_error = exc
+        message = "LOCKED"
     except Exception as exc:
         success = False
         message = f"Erro fatal no worker: {exc}"
@@ -394,6 +513,8 @@ def _executar_robo(mode: str) -> tuple[bool, str, int | None]:
         logger.remove(sink_id)
     except ValueError:
         pass
+    if lock_error is not None:
+        raise lock_error
     return success, message, exit_code
 
 
@@ -436,7 +557,15 @@ def _sleep_until_or_signal(target: datetime) -> str | None:
 
 def _run_with_auto_retry(mode: str) -> None:
     """Executa _run_once e, se houver falha total (0 sucessos), re-tenta 1x."""
-    _run_once(mode=mode)
+    try:
+        _run_once(mode=mode)
+    except LockUnavailable:
+        _request_protheus_retry(mode)
+        logger.info(
+            "Chromium ocupado. Signal Protheus preservado para retry."
+        )
+        time.sleep(POLL_INTERVAL_S)
+        return
 
     if not AUTO_RETRY:
         return
@@ -456,7 +585,15 @@ def _run_with_auto_retry(mode: str) -> None:
 
     # Limpa artifacts antes do retry
     _cleanup_run_artifacts()
-    _run_once(mode=mode)
+    try:
+        _run_once(mode=mode)
+    except LockUnavailable:
+        _request_protheus_retry(mode)
+        logger.info(
+            "Chromium ocupado. Signal Protheus preservado para retry."
+        )
+        time.sleep(POLL_INTERVAL_S)
+        return
 
     if not READY_FILE.exists():
         logger.error(
