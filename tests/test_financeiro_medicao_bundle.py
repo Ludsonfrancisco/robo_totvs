@@ -131,14 +131,69 @@ class FinanceiroMedicaoBundleTests(unittest.TestCase):
             self.assertTrue((first / "manifest.json").is_file())
             self.assertTrue((second / "manifest.json").is_file())
 
-    def test_write_or_fsync_failure_cleans_only_its_temp_directory(self):
+    def test_workbook_copy_write_failure_cleans_temp_and_preserves_outside_file(self):
         with TemporaryDirectory() as directory:
             root = Path(directory) / "financeiro_medicao"
             source = self.make_workbook(directory)
             outside = Path(directory) / "must_not_delete.txt"
             outside.write_text("keep", encoding="utf-8")
-            with patch("flows.financeiro_medicao.bundle.os.fsync", side_effect=OSError("fsync failed")):
-                with self.assertRaisesRegex(OSError, "fsync failed"):
+            original_open = Path.open
+
+            class FailingWriter:
+                def __init__(self, stream):
+                    self.stream = stream
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    self.stream.close()
+
+                def write(self, data):
+                    raise OSError("workbook write failed")
+
+                def __getattr__(self, name):
+                    return getattr(self.stream, name)
+
+            def open_with_write_failure(path, mode="r", *args, **kwargs):
+                stream = original_open(path, mode, *args, **kwargs)
+                if path.name == "medicao_original.xlsx" and mode == "wb":
+                    return FailingWriter(stream)
+                return stream
+
+            with patch("flows.financeiro_medicao.bundle.Path.open", new=open_with_write_failure):
+                with self.assertRaisesRegex(OSError, "workbook write failed"):
+                    self.build(root, source)
+
+            self.assertEqual(outside.read_text(encoding="utf-8"), "keep")
+            self.assertEqual(list((root / "inbox").iterdir()), [])
+            self.assertEqual(list((root / "runtime").iterdir()), [])
+
+    def test_workbook_fsync_failure_cleans_temp_and_preserves_outside_file(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "financeiro_medicao"
+            source = self.make_workbook(directory)
+            outside = Path(directory) / "must_not_delete.txt"
+            outside.write_text("keep", encoding="utf-8")
+            with patch("flows.financeiro_medicao.bundle.os.fsync", side_effect=OSError("workbook fsync failed")):
+                with self.assertRaisesRegex(OSError, "workbook fsync failed"):
+                    self.build(root, source)
+
+            self.assertEqual(outside.read_text(encoding="utf-8"), "keep")
+            self.assertEqual(list((root / "inbox").iterdir()), [])
+            self.assertEqual(list((root / "runtime").iterdir()), [])
+
+    def test_manifest_fsync_failure_cleans_temp_and_preserves_outside_file(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "financeiro_medicao"
+            source = self.make_workbook(directory)
+            outside = Path(directory) / "must_not_delete.txt"
+            outside.write_text("keep", encoding="utf-8")
+            with patch(
+                "flows.financeiro_medicao.bundle.os.fsync",
+                side_effect=(None, OSError("manifest fsync failed")),
+            ):
+                with self.assertRaisesRegex(OSError, "manifest fsync failed"):
                     self.build(root, source)
 
             self.assertEqual(outside.read_text(encoding="utf-8"), "keep")
