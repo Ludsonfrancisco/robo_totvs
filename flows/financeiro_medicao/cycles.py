@@ -30,6 +30,8 @@ def _next_month(year: int, month: int) -> tuple[int, int]:
 
 
 def window_for(day: date) -> CycleWindow:
+    day = date(day.year, day.month, day.day)
+
     if day.day <= 11:
         start_year, start_month = _previous_month(day)
     else:

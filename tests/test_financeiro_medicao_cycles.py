@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 import unittest
 
 from flows.financeiro_medicao import window_for
@@ -21,6 +21,22 @@ class FinanceiroMedicaoCycleTests(unittest.TestCase):
         self.assertEqual(window.query_end, date(2026, 8, 5))
         self.assertEqual(window.mode, "current")
 
+    def test_first_day_keeps_previous_month_cycle(self):
+        window = window_for(date(2026, 8, 1))
+
+        self.assertEqual(window.cycle_start, date(2026, 7, 11))
+        self.assertEqual(window.cycle_close, date(2026, 8, 10))
+        self.assertEqual(window.query_end, date(2026, 8, 1))
+        self.assertEqual(window.mode, "current")
+
+    def test_tenth_day_keeps_previous_month_cycle(self):
+        window = window_for(date(2026, 8, 10))
+
+        self.assertEqual(window.cycle_start, date(2026, 7, 11))
+        self.assertEqual(window.cycle_close, date(2026, 8, 10))
+        self.assertEqual(window.query_end, date(2026, 8, 10))
+        self.assertEqual(window.mode, "current")
+
     def test_closing_day_finalizes_previous_cycle(self):
         window = window_for(date(2026, 8, 11))
 
@@ -41,6 +57,16 @@ class FinanceiroMedicaoCycleTests(unittest.TestCase):
         window = window_for(date(2027, 1, 5))
 
         self.assertEqual(window.cycle_id, "2026-12-11--2027-01-10")
+        self.assertEqual(window.cycle_close, date(2027, 1, 10))
+        self.assertEqual(window.query_start, date(2026, 12, 11))
+        self.assertEqual(window.query_end, date(2027, 1, 5))
+        self.assertEqual(window.mode, "current")
+
+    def test_datetime_is_normalized_to_plain_dates(self):
+        window = window_for(datetime(2026, 7, 30, 23, 59))
+
+        self.assertIs(type(window.query_end), date)
+        self.assertEqual(window.query_end, date(2026, 7, 30))
 
 
 if __name__ == "__main__":
