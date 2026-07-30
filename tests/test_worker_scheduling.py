@@ -81,6 +81,44 @@ class WorkerSchedulingTests(unittest.TestCase):
         run_once.assert_called_once_with()
         worker_lock.assert_not_called()
 
+    def test_multiplica_signal_is_preserved_when_global_lock_is_busy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            signal_file = Path(tmp) / "multiplica.signal"
+            signal_file.touch()
+            with patch.object(
+                worker, "MULTIPLICA_SIGNAL_FILE", signal_file
+            ), patch.object(
+                multiplica_runner,
+                "run_once",
+                side_effect=multiplica_runner.AlreadyRunning("busy"),
+            ), patch.object(
+                worker, "file_lock"
+            ) as worker_lock:
+                consumed = worker._run_multiplica_signal_if_present()
+
+            self.assertFalse(consumed)
+            self.assertTrue(signal_file.exists())
+            self.assertEqual(
+                list(signal_file.parent.glob("*.claimed.*")),
+                [],
+            )
+        worker_lock.assert_not_called()
+
+    def test_scheduled_multiplica_collision_creates_retry_signal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            signal_file = Path(tmp) / "multiplica.signal"
+            with patch.object(
+                worker, "MULTIPLICA_SIGNAL_FILE", signal_file
+            ), patch.object(
+                multiplica_runner,
+                "run_once",
+                side_effect=multiplica_runner.AlreadyRunning("busy"),
+            ):
+                completed = worker._run_scheduled_multiplica()
+
+            self.assertFalse(completed)
+            self.assertTrue(signal_file.exists())
+
     def test_protheus_browser_entrypoint_uses_global_lock(self):
         events = []
 

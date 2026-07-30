@@ -9,7 +9,10 @@ from unittest.mock import patch
 
 from openpyxl import Workbook
 
-from flows.financeiro_medicao.bundle import build_bundle
+from flows.financeiro_medicao.bundle import (
+    BundleDurabilityError,
+    build_bundle,
+)
 from flows.financeiro_medicao.cycles import CycleWindow
 from flows.financeiro_medicao.workbook import REQUIRED_HEADERS, SHEET_NAME, WorkbookInvalid
 
@@ -282,12 +285,21 @@ class FinanceiroMedicaoBundleTests(unittest.TestCase):
                     raise OSError("inbox directory fsync failed")
 
             with patch("flows.financeiro_medicao.bundle._fsync_directory", side_effect=fail_inbox_sync):
-                with self.assertRaisesRegex(OSError, "inbox directory fsync failed"):
+                with self.assertRaises(BundleDurabilityError) as raised:
                     self.build(root, self.make_workbook(directory))
 
             self.assertEqual(sync_calls[-1], "inbox")
             packages = list((root / "inbox").iterdir())
             self.assertEqual(len(packages), 1)
+            self.assertEqual(raised.exception.published, packages[0])
+            self.assertEqual(
+                str(raised.exception),
+                "BUNDLE_DURABILITY_FAILED",
+            )
+            self.assertIsInstance(
+                raised.exception.__cause__,
+                OSError,
+            )
             self.assertTrue((packages[0] / "manifest.json").is_file())
             self.assertEqual(list((root / "runtime").iterdir()), [])
 

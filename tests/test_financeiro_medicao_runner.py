@@ -8,7 +8,8 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from flows.common.locks import LockUnavailable
+from flows.common.locks import LockUnavailable, file_lock
+from flows.financeiro_medicao.bundle import BundleDurabilityError
 from flows.financeiro_medicao.loga import CollectionError
 from flows.financeiro_medicao.runner import run_once
 from flows.financeiro_medicao.workbook import WorkbookInvalid
@@ -175,6 +176,26 @@ class FinanceiroMedicaoRunnerTests(unittest.TestCase):
         self.assertEqual(builder.call_count, 1)
         self.assertNotIn("sensitive", json.dumps(payload))
 
+    def test_published_bundle_durability_failure_preserves_run_id_without_retry(self):
+        def collector(_page, _window, _settings, destination):
+            destination.write_bytes(b"xlsx")
+            return destination
+
+        published = self.runtime_root / "inbox" / "durable-run-123"
+        builder = Mock(
+            side_effect=BundleDurabilityError(published)
+        )
+
+        payload = self._run_once(collector, bundle_builder=builder)
+
+        self.assertFalse(payload["success"])
+        self.assertEqual(
+            payload["error_code"],
+            "BUNDLE_DURABILITY_FAILED",
+        )
+        self.assertEqual(payload["run_id"], "durable-run-123")
+        self.assertEqual(builder.call_count, 1)
+
     def test_unexpected_exception_never_reaches_status(self):
         collector = Mock(
             side_effect=RuntimeError(
@@ -189,7 +210,7 @@ class FinanceiroMedicaoRunnerTests(unittest.TestCase):
         self.assertNotIn("cookie", json.dumps(payload).casefold())
         self.assertNotIn("https", json.dumps(payload).casefold())
 
-    def test_private_cleanup_failure_preserves_primary_error_code(self):
+    def test_private_cleanup_failure_takes_safe_operational_precedence(self):
         collector = Mock(
             side_effect=CollectionError("AUTH_EXPIRED")
         )
@@ -200,7 +221,10 @@ class FinanceiroMedicaoRunnerTests(unittest.TestCase):
         ):
             payload = self._run_once(collector)
 
-        self.assertEqual(payload["error_code"], "AUTH_EXPIRED")
+        self.assertEqual(
+            payload["error_code"],
+            "DOWNLOAD_TEMP_CLEANUP_FAILED",
+        )
         self.assertNotIn("sensitive", json.dumps(payload))
 
     def test_private_file_is_removed_when_collection_is_interrupted(self):
@@ -228,6 +252,48 @@ class FinanceiroMedicaoRunnerTests(unittest.TestCase):
 
         self.assertEqual(payload["error_code"], "LOCKED")
         page_factory.assert_not_called()
+
+    def test_flow_contention_returns_locked_without_replacing_canonical_status(self):
+        canonical = (
+            b'{"success":true,"error_code":"","run_id":"canonical"}\n'
+        )
+        self.runtime_root.mkdir()
+        done = self.runtime_root / "done.json"
+        done.write_bytes(canonical)
+        flow_lock = (
+            self.runtime_root
+            / "runtime"
+            / "financeiro_medicao.lock"
+        )
+
+        with file_lock(flow_lock, wait_seconds=0):
+            payload = self._run_once(Mock())
+
+        self.assertEqual(payload["error_code"], "LOCKED")
+        self.assertFalse(payload["success"])
+        self.assertEqual(done.read_bytes(), canonical)
+
+    def test_cleanup_failure_stops_retry_and_hides_transient_primary(self):
+        collector = Mock(
+            side_effect=CollectionError("DOWNLOAD_TIMEOUT")
+        )
+
+        with patch(
+            "flows.financeiro_medicao.runner._remove_private_file",
+            side_effect=OSError(
+                "C:\\sensitive\\private.xlsx?token=secret"
+            ),
+        ):
+            payload = self._run_once(collector)
+
+        self.assertEqual(
+            payload["error_code"],
+            "DOWNLOAD_TEMP_CLEANUP_FAILED",
+        )
+        self.assertEqual(collector.call_count, 1)
+        serialized = json.dumps(payload).casefold()
+        self.assertNotIn("sensitive", serialized)
+        self.assertNotIn("token", serialized)
 
     def test_flow_lock_is_acquired_before_global_chromium_lock(self):
         events = []

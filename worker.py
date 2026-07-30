@@ -54,6 +54,7 @@ import time
 import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
+from uuid import uuid4
 
 from loguru import logger
 
@@ -61,9 +62,7 @@ from flows.common.locks import file_lock
 
 DATA_PIPELINE_DIR = Path(os.environ.get("DATA_PIPELINE_DIR", "/app/data_pipeline"))
 GLOBAL_CHROMIUM_LOCK = DATA_PIPELINE_DIR / "runtime" / "chromium.lock"
-CHROMIUM_LOCK_WAIT_SECONDS = int(
-    os.environ.get("CHROMIUM_LOCK_WAIT_SECONDS", "1200")
-)
+CHROMIUM_LOCK_WAIT_SECONDS = 0
 SCHEDULE_HOUR = int(os.environ.get("ROBOT_SCHEDULE_HOUR", "6"))
 SCHEDULE_MINUTE = int(os.environ.get("ROBOT_SCHEDULE_MINUTE", "0"))
 RUN_ON_START = os.environ.get("ROBOT_RUN_ON_START", "false").lower() in ("1", "true", "yes")
@@ -143,11 +142,67 @@ def _run_multiplica_signal_if_present() -> bool:
     if not MULTIPLICA_SIGNAL_FILE.exists():
         return False
 
-    MULTIPLICA_SIGNAL_FILE.unlink(missing_ok=True)
-    logger.info("Signal Multiplica detectado. Executando coleta manual.")
-    from flows.multiplica.runner import run_once
+    claimed_signal = MULTIPLICA_SIGNAL_FILE.with_name(
+        f".{MULTIPLICA_SIGNAL_FILE.name}.claimed.{uuid4().hex}"
+    )
+    try:
+        os.replace(MULTIPLICA_SIGNAL_FILE, claimed_signal)
+    except FileNotFoundError:
+        return False
 
-    run_once()
+    logger.info("Signal Multiplica detectado. Executando coleta manual.")
+    from flows.multiplica.runner import AlreadyRunning, run_once
+
+    try:
+        run_once()
+    except AlreadyRunning:
+        os.replace(claimed_signal, MULTIPLICA_SIGNAL_FILE)
+        logger.info(
+            "Chromium ocupado. Signal Multiplica preservado para retry."
+        )
+        return False
+    except BaseException:
+        os.replace(claimed_signal, MULTIPLICA_SIGNAL_FILE)
+        raise
+    claimed_signal.unlink(missing_ok=True)
+    return True
+
+
+def _request_multiplica_retry() -> None:
+    MULTIPLICA_SIGNAL_FILE.parent.mkdir(parents=True, exist_ok=True)
+    temporary = MULTIPLICA_SIGNAL_FILE.with_name(
+        f".{MULTIPLICA_SIGNAL_FILE.name}.{uuid4().hex}.tmp"
+    )
+    descriptor = None
+    created = False
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            0o600,
+        )
+        created = True
+        os.close(descriptor)
+        descriptor = None
+        os.replace(temporary, MULTIPLICA_SIGNAL_FILE)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if created:
+            temporary.unlink(missing_ok=True)
+
+
+def _run_scheduled_multiplica() -> bool:
+    from flows.multiplica.runner import AlreadyRunning, run_once
+
+    try:
+        run_once()
+    except AlreadyRunning:
+        _request_multiplica_retry()
+        logger.info(
+            "Chromium ocupado. Coleta Multiplica agendada para retry."
+        )
+        return False
     return True
 
 
@@ -611,9 +666,7 @@ def loop_forever() -> None:
                 elif next_name == "routerbox":
                     _run_routerbox_backlog()
                 elif next_name == "multiplica":
-                    from flows.multiplica.runner import run_once
-
-                    run_once()
+                    _run_scheduled_multiplica()
 
         except KeyboardInterrupt:
             logger.info("KeyboardInterrupt recebido. Encerrando.")

@@ -8,7 +8,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from .browser import authenticated_page
-from .bundle import build_bundle
+from .bundle import BundleDurabilityError, build_bundle
 from .config import Settings
 from .cycles import window_for
 from .loga import CollectionError, collect
@@ -82,6 +82,8 @@ def _safe_error_code(error: Exception) -> str:
         return "LOCKED"
     if isinstance(error, WorkbookInvalid):
         return "WORKBOOK_INVALID"
+    if isinstance(error, BundleDurabilityError):
+        return "BUNDLE_DURABILITY_FAILED"
     if isinstance(error, CollectionError):
         if error.code in _KNOWN_COLLECTION_ERRORS:
             return error.code
@@ -197,12 +199,15 @@ def _collect_bundle(
         except OSError as error:
             cleanup_error = error
 
-    if primary_error is not None:
-        if cleanup_error is not None:
-            raise primary_error from cleanup_error
-        raise primary_error
     if cleanup_error is not None:
-        raise CollectionError("DOWNLOAD_TEMP_CLEANUP_FAILED") from cleanup_error
+        cleanup_failure = CollectionError(
+            "DOWNLOAD_TEMP_CLEANUP_FAILED"
+        )
+        if primary_error is not None:
+            raise cleanup_failure from primary_error
+        raise cleanup_failure from cleanup_error
+    if primary_error is not None:
+        raise primary_error
     return Path(published)
 
 
@@ -298,6 +303,17 @@ def run_once(
                                 error_code = ""
                                 break
                             except Exception as error:
+                                if isinstance(
+                                    error,
+                                    BundleDurabilityError,
+                                ):
+                                    candidate_run_id = (
+                                        error.published.name
+                                    )
+                                    if _RUN_ID.fullmatch(
+                                        candidate_run_id
+                                    ):
+                                        run_id = candidate_run_id
                                 error_code = _safe_error_code(error)
                                 if (
                                     error_code not in RETRYABLE_ERRORS
@@ -331,7 +347,6 @@ def run_once(
         run_id=run_id,
         error_code=error_code,
     )
-    _write_done(runtime_root, payload)
     return payload
 
 

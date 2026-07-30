@@ -50,19 +50,14 @@ class RunnerTests(unittest.TestCase):
             / "runtime"
             / "chromium.lock"
         )
-        with patch.object(
-            runner,
-            "GLOBAL_CHROMIUM_LOCK_WAIT_SECONDS",
-            0,
-        ):
-            with file_lock(global_lock, wait_seconds=0):
-                with self.assertRaises(AlreadyRunning):
-                    run_once(
-                        settings=self.settings,
-                        day=date(2026, 7, 23),
-                        page_factory=self.page_factory,
-                        collector=lambda *_: None,
-                    )
+        with file_lock(global_lock, wait_seconds=0):
+            with self.assertRaises(AlreadyRunning):
+                run_once(
+                    settings=self.settings,
+                    day=date(2026, 7, 23),
+                    page_factory=self.page_factory,
+                    collector=lambda *_: None,
+                )
 
     def test_flow_lock_is_acquired_before_global_chromium_lock(self):
         events = []
@@ -79,10 +74,6 @@ class RunnerTests(unittest.TestCase):
             runner,
             "file_lock",
             side_effect=recording_lock,
-        ), patch.object(
-            runner,
-            "GLOBAL_CHROMIUM_LOCK_WAIT_SECONDS",
-            37,
         ):
             run_once(
                 settings=self.settings,
@@ -105,8 +96,8 @@ class RunnerTests(unittest.TestCase):
             events,
             [
                 ("enter", flow_lock, 0),
-                ("enter", global_lock, 37),
-                ("exit", global_lock, 37),
+                ("enter", global_lock, 0),
+                ("exit", global_lock, 0),
                 ("exit", flow_lock, 0),
             ],
         )

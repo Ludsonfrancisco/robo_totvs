@@ -15,6 +15,14 @@ _WORKBOOK_NAME = "medicao_original.xlsx"
 _MANIFEST_NAME = "manifest.json"
 
 
+class BundleDurabilityError(RuntimeError):
+    """A bundle is visible, but its directory entry may not be durable."""
+
+    def __init__(self, published: Path):
+        super().__init__("BUNDLE_DURABILITY_FAILED")
+        self.published = Path(published)
+
+
 def _validate_inputs(runtime_root, scheduled_for, started_at, finished_at, image_revision):
     root = Path(runtime_root)
     if root.name != "financeiro_medicao":
@@ -137,8 +145,11 @@ def build_bundle(*, runtime_root: Path, source: Path, window: CycleWindow,
         _fsync_directory(temp_dir)
         _fsync_directory(runtime_dir)
         os.replace(temp_dir, published_dir)
-        _fsync_directory(inbox_dir)
-        _fsync_directory(runtime_dir)
+        try:
+            _fsync_directory(inbox_dir)
+            _fsync_directory(runtime_dir)
+        except BaseException as error:
+            raise BundleDurabilityError(published_dir) from error
         return published_dir
     except BaseException:
         _remove_temp(temp_dir, runtime_dir)
