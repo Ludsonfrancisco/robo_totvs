@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <title>Medição de Pagamento à Terceiros</title>
+  </head>
+  <body>
+    <select type="date" id="modoCalculo" value="" class="form-control">
+      <option value="Todos">Todos</option>
+      <option value="Expurgados">Atendimentos Pagos</option>
+    </select>
+    <select type="date" id="tipoMedicao" value="" class="form-control">
+      <option value="">Todos</option>
+      <option value="Auditados">Atendimentos Auditados</option>
+      <option value="NaoAuditados">Atendimentos Não Auditados</option>
+    </select>
+    <select type="date" id="tipoAgrupamento" value="" class="form-control">
+      <option value="cidade">Cidades</option>
+      <option value="usuario">Técnicos</option>
+    </select>
+    <input type="date" id="dti" value="" class="form-control">
+    <input type="date" id="dtf" value="" class="form-control">
+    <button class="btn btn-dark p-0 w-100">Filtros</button>
+    <button id="btn" class="btn btn-info text-nowrap w-100">Exportar Atendimentos</button>
+    <button id="btn" class="btn btn-primary w-100">Pesquisar</button>
+  </body>
+</html>
