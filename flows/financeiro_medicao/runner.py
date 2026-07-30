@@ -1,5 +1,4 @@
-from datetime import date, datetime, timedelta
-import json
+from datetime import date, datetime
 import os
 from pathlib import Path
 import re
@@ -8,9 +7,35 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from .browser import authenticated_page
-from .bundle import BundleDurabilityError, build_bundle
+from .bundle import (
+    BundleCollisionError,
+    BundleDurabilityError,
+    PublishedBundleDetails,
+    build_bundle,
+    inspect_committed_publication,
+    inspect_publication_proof,
+    inspect_published_bundle,
+)
 from .config import Settings
 from .cycles import window_for
+from .events import (
+    atomic_json_write as _atomic_json_write,
+    event_owner_lock,
+    event_receipt_path,
+    event_result_path,
+    fsync_directory as _fsync_directory,
+    mkdir_durable as _mkdir_durable,
+    next_scheduled_for as _next_scheduled_for,
+    payload_from_published as _payload_from_published,
+    quarantine_event_result,
+    read_event_result,
+    read_success_receipt as _read_success_receipt,
+    reconcile_published_event,
+    reconcile_published_event_locked as _reconcile_published_event_locked,
+    scheduled_event_identity,
+    write_event_result as _write_event_result,
+    write_success_receipt as _write_success_receipt,
+)
 from .loga import CollectionError, collect
 from .workbook import WorkbookInvalid
 from flows.common.locks import LockUnavailable, file_lock
@@ -84,6 +109,8 @@ def _safe_error_code(error: Exception) -> str:
         return "WORKBOOK_INVALID"
     if isinstance(error, BundleDurabilityError):
         return "BUNDLE_DURABILITY_FAILED"
+    if isinstance(error, BundleCollisionError):
+        return "BUNDLE_COLLISION"
     if isinstance(error, CollectionError):
         if error.code in _KNOWN_COLLECTION_ERRORS:
             return error.code
@@ -104,22 +131,6 @@ def _published_run_id(error: Exception) -> str | None:
     return None
 
 
-def _next_scheduled_for(settings, moment: datetime) -> str | None:
-    if getattr(settings, "schedule_enabled", False) is not True:
-        return None
-    timezone = ZoneInfo(settings.timezone)
-    local_moment = moment.astimezone(timezone)
-    candidate = local_moment.replace(
-        hour=settings.schedule_hour,
-        minute=settings.schedule_minute,
-        second=0,
-        microsecond=0,
-    )
-    if candidate <= local_moment:
-        candidate += timedelta(days=1)
-    return candidate.isoformat()
-
-
 def _lock_wait_seconds(settings) -> float:
     value = getattr(settings, "lock_wait_seconds", 0)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -127,47 +138,8 @@ def _lock_wait_seconds(settings) -> float:
     return value
 
 
-def _fsync_directory(path: Path) -> None:
-    if os.name == "nt":
-        return
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    descriptor = os.open(path, flags)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
 def _write_done(runtime_root: Path, payload: dict) -> None:
-    target = runtime_root / "done.json"
-    temporary = runtime_root / f".done.json.{uuid4().hex}.tmp"
-    descriptor = None
-    created = False
-    try:
-        descriptor = os.open(
-            temporary,
-            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-            0o600,
-        )
-        created = True
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
-            descriptor = None
-            json.dump(
-                payload,
-                stream,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, target)
-        _fsync_directory(runtime_root)
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
-        if created:
-            temporary.unlink(missing_ok=True)
+    _atomic_json_write(runtime_root / "done.json", payload)
 
 
 def _collect_bundle(
@@ -179,6 +151,7 @@ def _collect_bundle(
     bundle_builder,
     started_at,
     scheduled_for,
+    run_id,
     image_revision,
     clock,
 ):
@@ -195,7 +168,7 @@ def _collect_bundle(
             if collected.resolve() != private_file.resolve():
                 raise CollectionError("DOWNLOAD_FAILED")
             finished_at = clock()
-            published = bundle_builder(
+            bundle_arguments = dict(
                 runtime_root=Path(settings.runtime_root),
                 source=private_file,
                 window=window,
@@ -204,6 +177,9 @@ def _collect_bundle(
                 finished_at=finished_at,
                 image_revision=image_revision,
             )
+            if run_id is not None:
+                bundle_arguments["run_id"] = run_id
+            published = bundle_builder(**bundle_arguments)
         except BaseException as error:
             primary_error = error
     finally:
@@ -264,6 +240,7 @@ def run_once(
     clock=None,
     scheduled_for: datetime | None = None,
     image_revision: str | None = None,
+    event_id: str | None = None,
 ):
     settings = settings or Settings.from_mapping(os.environ)
     runtime_root = Path(settings.runtime_root)
@@ -278,6 +255,13 @@ def run_once(
 
     started_at = clock()
     scheduled_for = scheduled_for or started_at
+    deterministic_run_id = None
+    if event_id is not None:
+        expected_event_id, deterministic_run_id = (
+            scheduled_event_identity(scheduled_for)
+        )
+        if event_id != expected_event_id:
+            raise ValueError("Event identity does not match schedule.")
     day = day or started_at.date()
     window = window_for(day)
     image_revision = (
@@ -290,9 +274,29 @@ def run_once(
     lock_wait_seconds = _lock_wait_seconds(settings)
     run_id = None
     error_code = ""
+    published_details = None
 
     try:
         with file_lock(flow_lock, wait_seconds=lock_wait_seconds):
+            if event_id is not None:
+                existing = read_event_result(
+                    runtime_root,
+                    event_id,
+                    scheduled_for,
+                )
+                if existing is not None and (
+                    existing.get("success") is True
+                    or existing.get("error_code")
+                    not in RETRYABLE_ERRORS | {"UNEXPECTED_ERROR"}
+                ):
+                    return existing
+                recovered = _reconcile_published_event_locked(
+                    settings,
+                    event_id,
+                    scheduled_for,
+                )
+                if recovered is not None:
+                    return recovered
             try:
                 with file_lock(
                     chromium_lock,
@@ -309,6 +313,7 @@ def run_once(
                                     bundle_builder=bundle_builder,
                                     started_at=started_at,
                                     scheduled_for=scheduled_for,
+                                    run_id=deterministic_run_id,
                                     image_revision=image_revision,
                                     clock=clock,
                                 )
@@ -318,6 +323,19 @@ def run_once(
                                         "Invalid bundle identifier."
                                     )
                                 run_id = candidate_run_id
+                                if event_id is not None:
+                                    published_details = (
+                                        inspect_committed_publication(
+                                            runtime_root=runtime_root,
+                                            run_id=run_id,
+                                            window=window,
+                                            scheduled_for=scheduled_for,
+                                        )
+                                    )
+                                    if published_details is None:
+                                        raise RuntimeError(
+                                            "Published bundle disappeared."
+                                        )
                                 error_code = ""
                                 break
                             except Exception as error:
@@ -337,14 +355,43 @@ def run_once(
                 error_code = _safe_error_code(error)
 
             finished_at = clock()
-            payload = _status_payload(
-                settings=settings,
-                window=window,
-                started_at=started_at,
-                finished_at=finished_at,
-                run_id=run_id,
-                error_code=error_code,
+            payload = (
+                _payload_from_published(
+                    settings,
+                    published_details,
+                )
+                if (
+                    event_id is not None
+                    and not error_code
+                    and published_details is not None
+                )
+                else _status_payload(
+                    settings=settings,
+                    window=window,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    run_id=(
+                        None
+                        if error_code == "BUNDLE_COLLISION"
+                        else run_id
+                    ),
+                    error_code=error_code,
+                )
             )
+            if event_id is not None:
+                if payload["success"]:
+                    _write_success_receipt(
+                        runtime_root,
+                        event_id,
+                        scheduled_for,
+                        published_details,
+                    )
+                _write_event_result(
+                    runtime_root,
+                    event_id,
+                    scheduled_for,
+                    payload,
+                )
             _write_done(runtime_root, payload)
             return payload
     except LockUnavailable:

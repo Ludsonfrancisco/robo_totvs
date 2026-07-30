@@ -154,9 +154,14 @@ class WorkerSchedulingTests(unittest.TestCase):
                 )
 
         self.assertTrue(result)
+        event_id, _ = financeiro_medicao_runner.scheduled_event_identity(
+            scheduled_for
+        )
         run_once.assert_called_once_with(
+            settings=settings,
             day=scheduled_for.date(),
             scheduled_for=scheduled_for,
+            event_id=event_id,
         )
         self.assertNotIn(worker.GLOBAL_CHROMIUM_LOCK, locked_paths)
 

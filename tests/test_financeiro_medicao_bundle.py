@@ -1,14 +1,17 @@
 from datetime import date, datetime, timezone
 import hashlib
+from io import BytesIO
 import json
 import os
 from pathlib import Path
+import stat
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
 from openpyxl import Workbook
 
+from flows.financeiro_medicao import bundle
 from flows.financeiro_medicao.bundle import (
     BundleDurabilityError,
     build_bundle,
@@ -44,12 +47,295 @@ class FinanceiroMedicaoBundleTests(unittest.TestCase):
         workbook.close()
         return path
 
-    def build(self, runtime_root, source, *, image_revision="sha256:abc123"):
-        return build_bundle(
+    def build(
+        self,
+        runtime_root,
+        source,
+        *,
+        image_revision="sha256:abc123",
+        run_id=None,
+    ):
+        arguments = dict(
             runtime_root=Path(runtime_root), source=source, window=self.window,
             scheduled_for=self.scheduled_for, started_at=self.started_at,
             finished_at=self.finished_at, image_revision=image_revision,
         )
+        if run_id is not None:
+            arguments["run_id"] = run_id
+        return build_bundle(**arguments)
+
+    def test_deterministic_bundle_reuses_only_valid_publication(self):
+        self.assertTrue(
+            hasattr(bundle, "BundleCollisionError"),
+            "bundle must reject an inconsistent deterministic collision",
+        )
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "financeiro_medicao"
+            source = self.make_workbook(directory)
+            run_id = "a" * 32
+
+            first = self.build(root, source, run_id=run_id)
+            repeated = self.build(root, source, run_id=run_id)
+            (first / "medicao_original.xlsx").write_bytes(b"corrupted")
+
+            self.assertEqual(repeated, first)
+            with self.assertRaises(bundle.BundleCollisionError):
+                self.build(root, source, run_id=run_id)
+
+    def test_validation_uses_one_private_workbook_snapshot(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "financeiro_medicao"
+            run_id = "b" * 32
+            published = self.build(
+                root,
+                self.make_workbook(directory),
+                run_id=run_id,
+            )
+            original_validate = bundle.validate_workbook
+            validated_sources = []
+
+            def record_validation(source, query_start, query_end):
+                validated_sources.append(source)
+                self.assertFalse(source.closed)
+                return original_validate(
+                    source,
+                    query_start,
+                    query_end,
+                )
+
+            with patch.object(
+                bundle,
+                "validate_workbook",
+                side_effect=record_validation,
+            ):
+                result = bundle.validate_published_bundle(
+                    runtime_root=root,
+                    run_id=run_id,
+                    window=self.window,
+                    scheduled_for=self.scheduled_for,
+                )
+
+            self.assertEqual(result, published)
+            self.assertEqual(len(validated_sources), 1)
+            self.assertFalse(
+                isinstance(validated_sources[0], (str, Path))
+            )
+            self.assertTrue(validated_sources[0].closed)
+            self.assertFalse(Path(validated_sources[0].name).exists())
+
+    def test_validation_uses_open_snapshot_when_pathname_is_swapped(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "financeiro_medicao"
+            run_id = "f" * 32
+            published = self.build(
+                root,
+                self.make_workbook(directory),
+                run_id=run_id,
+            )
+            original_validate = bundle.validate_workbook
+            decoy_path = root / "runtime" / "snapshot-decoy.xlsx"
+            decoy_path.write_bytes(b"decoy")
+
+            class NamedBytesIO(BytesIO):
+                name = str(decoy_path)
+
+            def swap_then_validate(source, query_start, query_end):
+                decoy_path.write_bytes(b"swapped pathname")
+                source.seek(0)
+                return original_validate(
+                    source,
+                    query_start,
+                    query_end,
+                )
+
+            with patch(
+                "flows.common.safe_snapshot.tempfile.NamedTemporaryFile",
+                return_value=NamedBytesIO(),
+            ), patch.object(
+                bundle,
+                "validate_workbook",
+                side_effect=swap_then_validate,
+            ):
+                result = bundle.validate_published_bundle(
+                    runtime_root=root,
+                    run_id=run_id,
+                    window=self.window,
+                    scheduled_for=self.scheduled_for,
+                )
+
+            self.assertEqual(result, published)
+
+    def test_inspector_returns_validated_manifest_snapshot(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "financeiro_medicao"
+            run_id = "1" * 32
+            published = self.build(
+                root,
+                self.make_workbook(directory),
+                run_id=run_id,
+            )
+
+            details = bundle.inspect_published_bundle(
+                runtime_root=root,
+                run_id=run_id,
+                window=self.window,
+                scheduled_for=self.scheduled_for,
+            )
+
+        self.assertEqual(details.path, published)
+        self.assertEqual(details.manifest["run_id"], run_id)
+        self.assertEqual(
+            details.workbook_size,
+            details.manifest["workbook_size"],
+        )
+        self.assertEqual(
+            details.workbook_sha256,
+            details.manifest["workbook_sha256"],
+        )
+
+    def test_independent_proof_is_durable_before_inbox_visibility(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "financeiro_medicao"
+            run_id = "2" * 32
+            replacements = []
+            original_replace = os.replace
+
+            def record_replace(source, destination):
+                replacements.append(Path(destination))
+                return original_replace(source, destination)
+
+            with patch.object(
+                bundle.os,
+                "replace",
+                side_effect=record_replace,
+            ):
+                published = self.build(
+                    root,
+                    self.make_workbook(directory),
+                    run_id=run_id,
+                )
+
+            proof = root / "runtime" / "proofs" / run_id
+            details = bundle.inspect_publication_proof(
+                runtime_root=root,
+                run_id=run_id,
+                window=self.window,
+                scheduled_for=self.scheduled_for,
+            )
+
+        self.assertLess(
+            replacements.index(proof),
+            replacements.index(published),
+        )
+        self.assertEqual(details.path, proof)
+        self.assertEqual(details.manifest["run_id"], run_id)
+
+    def test_consumed_bundle_is_not_republished_when_proof_exists(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "financeiro_medicao"
+            run_id = "3" * 32
+            source = self.make_workbook(directory)
+            published = self.build(root, source, run_id=run_id)
+            consumed = Path(directory) / "consumed" / run_id
+            consumed.parent.mkdir()
+            os.replace(published, consumed)
+
+            repeated = self.build(root, source, run_id=run_id)
+
+            self.assertEqual(
+                repeated,
+                bundle.publication_proof_path(root, run_id),
+            )
+            self.assertTrue(repeated.is_dir())
+            self.assertFalse(published.exists())
+
+    def test_validation_rejects_workbook_swap_during_snapshot(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "financeiro_medicao"
+            run_id = "c" * 32
+            published = self.build(
+                root,
+                self.make_workbook(directory),
+                run_id=run_id,
+            )
+            workbook_path = published / "medicao_original.xlsx"
+            replacement = root / "runtime" / "replacement.xlsx"
+            replacement.write_bytes(workbook_path.read_bytes())
+            original_validate = bundle.validate_workbook
+
+            def swap_then_validate(path, query_start, query_end):
+                os.replace(replacement, workbook_path)
+                return original_validate(path, query_start, query_end)
+
+            with patch.object(
+                bundle,
+                "validate_workbook",
+                side_effect=swap_then_validate,
+            ), self.assertRaises(bundle.BundleCollisionError):
+                bundle.validate_published_bundle(
+                    runtime_root=root,
+                    run_id=run_id,
+                    window=self.window,
+                    scheduled_for=self.scheduled_for,
+                )
+
+    def test_validation_rejects_published_workbook_symlink(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "financeiro_medicao"
+            run_id = "d" * 32
+            published = self.build(
+                root,
+                self.make_workbook(directory),
+                run_id=run_id,
+            )
+            workbook_path = published / "medicao_original.xlsx"
+            outside = Path(directory) / "outside.xlsx"
+            outside.write_bytes(workbook_path.read_bytes())
+            workbook_path.unlink()
+            try:
+                workbook_path.symlink_to(outside)
+            except OSError as error:
+                self.skipTest(f"symlinks unavailable: {error}")
+
+            with self.assertRaises(bundle.BundleCollisionError):
+                bundle.validate_published_bundle(
+                    runtime_root=root,
+                    run_id=run_id,
+                    window=self.window,
+                    scheduled_for=self.scheduled_for,
+                )
+
+    def test_windows_validation_fails_closed_on_simulated_symlink(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "financeiro_medicao"
+            run_id = "e" * 32
+            published = self.build(
+                root,
+                self.make_workbook(directory),
+                run_id=run_id,
+            )
+            workbook_path = published / "medicao_original.xlsx"
+            original_lstat = Path.lstat
+
+            def report_workbook_symlink(path):
+                metadata = original_lstat(path)
+                if Path(path) == workbook_path:
+                    values = list(metadata)
+                    values[0] = stat.S_IFLNK | 0o777
+                    return os.stat_result(values)
+                return metadata
+
+            with patch.object(
+                Path,
+                "lstat",
+                new=report_workbook_symlink,
+            ), self.assertRaises(bundle.BundleCollisionError):
+                bundle.validate_published_bundle(
+                    runtime_root=root,
+                    run_id=run_id,
+                    window=self.window,
+                    scheduled_for=self.scheduled_for,
+                )
 
     def test_publishes_canonical_manifest_with_hash_of_published_workbook(self):
         with TemporaryDirectory() as directory:
@@ -132,6 +418,8 @@ class FinanceiroMedicaoBundleTests(unittest.TestCase):
             second = self.build(root, source)
 
             self.assertNotEqual(first.name, second.name)
+            self.assertRegex(first.name, r"^[0-9a-f]{32}$")
+            self.assertRegex(second.name, r"^[0-9a-f]{32}$")
             self.assertTrue((first / "manifest.json").is_file())
             self.assertTrue((second / "manifest.json").is_file())
 
@@ -212,12 +500,16 @@ class FinanceiroMedicaoBundleTests(unittest.TestCase):
             (root / "runtime").mkdir(parents=True)
             (root / "inbox").mkdir()
             events = []
+            original_replace = os.replace
 
             def record_sync(path):
                 events.append(("sync", Path(path).name))
 
             def record_replace(source, destination):
-                events.append(("replace", Path(source).name, Path(destination).name))
+                events.append(
+                    ("replace", Path(source), Path(destination))
+                )
+                original_replace(source, destination)
 
             with (
                 patch("flows.financeiro_medicao.bundle._fsync_directory", side_effect=record_sync),
@@ -225,10 +517,40 @@ class FinanceiroMedicaoBundleTests(unittest.TestCase):
             ):
                 self.build(root, self.make_workbook(directory))
 
-        self.assertEqual([event[0] for event in events], ["sync", "sync", "replace", "sync", "sync"])
+        replacements = [
+            event for event in events if event[0] == "replace"
+        ]
+        self.assertEqual(len(replacements), 4)
         self.assertEqual(
-            [events[0][1], events[1][1], events[3][1], events[4][1]],
-            [events[2][1], "runtime", "inbox", "runtime"],
+            replacements[0][2].parent.name,
+            "proofs",
+        )
+        self.assertEqual(
+            replacements[1][2].parent.name,
+            "inbox",
+        )
+        self.assertEqual(
+            replacements[2][2].name,
+            "publication.json",
+        )
+        self.assertEqual(
+            replacements[3][2].parent.name,
+            "inbox",
+        )
+        proof_replace = events.index(replacements[0])
+        pending_replace = events.index(replacements[1])
+        commit_replace = events.index(replacements[2])
+        inbox_replace = events.index(replacements[3])
+        self.assertLess(proof_replace, pending_replace)
+        self.assertLess(pending_replace, commit_replace)
+        self.assertLess(commit_replace, inbox_replace)
+        self.assertIn(
+            ("sync", "proofs"),
+            events[proof_replace + 1 : pending_replace],
+        )
+        self.assertEqual(
+            events[inbox_replace + 1 : inbox_replace + 3],
+            [("sync", "inbox"), ("sync", "runtime")],
         )
 
     def test_initial_runtime_structure_is_synced_before_publication(self):
@@ -243,7 +565,9 @@ class FinanceiroMedicaoBundleTests(unittest.TestCase):
                 events.append(("sync", Path(path).name))
 
             def record_replace(source, destination):
-                events.append(("replace", Path(source).name, Path(destination).name))
+                events.append(
+                    ("replace", Path(source), Path(destination))
+                )
                 original_replace(source, destination)
 
             with (
@@ -258,9 +582,18 @@ class FinanceiroMedicaoBundleTests(unittest.TestCase):
             ("sync", "runtime"), ("sync", "financeiro_medicao"),
             ("sync", "inbox"), ("sync", "financeiro_medicao"),
         ])
-        self.assertEqual(events[6][0], "sync")
-        self.assertEqual(events[7], ("sync", "runtime"))
-        self.assertEqual(events[8][0], "replace")
+        replacements = [
+            event for event in events if event[0] == "replace"
+        ]
+        self.assertEqual(
+            [Path(event[2]).parent.name for event in replacements],
+            [
+                "proofs",
+                "inbox",
+                replacements[0][2].name,
+                "inbox",
+            ],
+        )
 
     def test_rejects_missing_runtime_parent_without_creating_it(self):
         with TemporaryDirectory() as directory:
@@ -277,11 +610,15 @@ class FinanceiroMedicaoBundleTests(unittest.TestCase):
             (root / "runtime").mkdir(parents=True)
             (root / "inbox").mkdir()
             sync_calls = []
+            inbox_syncs = 0
 
             def fail_inbox_sync(path):
+                nonlocal inbox_syncs
                 name = Path(path).name
                 sync_calls.append(name)
                 if name == "inbox":
+                    inbox_syncs += 1
+                if name == "inbox" and inbox_syncs == 2:
                     raise OSError("inbox directory fsync failed")
 
             with patch("flows.financeiro_medicao.bundle._fsync_directory", side_effect=fail_inbox_sync):
@@ -301,7 +638,16 @@ class FinanceiroMedicaoBundleTests(unittest.TestCase):
                 OSError,
             )
             self.assertTrue((packages[0] / "manifest.json").is_file())
-            self.assertEqual(list((root / "runtime").iterdir()), [])
+            proof = (
+                root
+                / "runtime"
+                / "proofs"
+                / packages[0].name
+            )
+            self.assertTrue(
+                (proof / "medicao_original.xlsx").is_file()
+            )
+            self.assertTrue((proof / "manifest.json").is_file())
 
     def test_post_replace_sync_does_not_absorb_termination_signals(self):
         for termination in (KeyboardInterrupt(), SystemExit(23)):
@@ -310,12 +656,8 @@ class FinanceiroMedicaoBundleTests(unittest.TestCase):
                     root = Path(directory) / "financeiro_medicao"
                     (root / "runtime").mkdir(parents=True)
                     (root / "inbox").mkdir()
-                    calls = 0
-
-                    def interrupt_after_replace(_path):
-                        nonlocal calls
-                        calls += 1
-                        if calls == 3:
+                    def interrupt_after_replace(path):
+                        if Path(path).name == "inbox":
                             raise termination
 
                     with patch(

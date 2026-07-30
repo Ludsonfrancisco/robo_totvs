@@ -20,6 +20,7 @@ RETRY_MAX_SECONDS = os.environ.get(
     "FINANCEIRO_MEDICAO_RETRY_MAX_SECONDS",
     "900",
 )
+CLAIM_POLL_SECONDS = 5
 TRANSIENT_ERRORS = set(runner.RETRYABLE_ERRORS) | {
     "LOCKED",
     "UNEXPECTED_ERROR",
@@ -29,6 +30,7 @@ KNOWN_ERRORS = TRANSIENT_ERRORS | {
     "AUTH_STATE_FAILED",
     "AUTH_STATE_CLEANUP_FAILED",
     "BUNDLE_DURABILITY_FAILED",
+    "BUNDLE_COLLISION",
     "COLLECTION_FAILED",
     "CONFIG_INVALID",
     "DOWNLOAD_TEMP_CLEANUP_FAILED",
@@ -120,23 +122,36 @@ def _atomic_write(path: Path, payload: dict) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _day_completed(settings, local_date) -> bool:
+def _day_completed(settings, scheduled_for: datetime) -> bool:
+    scheduled_for = _local(
+        scheduled_for,
+        ZoneInfo(settings.timezone),
+    )
     _, watermark_path, _ = _runtime_paths(settings)
     watermark = _read_json(watermark_path)
+    event_id, _ = runner.scheduled_event_identity(scheduled_for)
     if (
-        watermark.get("local_date") == local_date.isoformat()
+        watermark.get("local_date")
+        == scheduled_for.date().isoformat()
+        and watermark.get("event_id") == event_id
         and watermark.get("outcome") in {"success", "terminal"}
     ):
         return True
-
-    done = _read_json(Path(settings.runtime_root) / "done.json")
-    if done.get("success") is not True:
+    try:
+        result = runner.read_event_result(
+            settings.runtime_root,
+            event_id,
+            scheduled_for,
+        )
+    except ValueError:
         return False
-    finished = _parse_datetime(
-        done.get("finished_at"),
-        ZoneInfo(settings.timezone),
+    if result is None:
+        return False
+    error_code = _error_code(result)
+    return (
+        result.get("success") is True
+        or error_code not in TRANSIENT_ERRORS
     )
-    return finished is not None and finished.date() == local_date
 
 
 def next_event_at(now: datetime, settings) -> datetime:
@@ -155,7 +170,10 @@ def next_event_at(now: datetime, settings) -> datetime:
     )
     if retry_at is not None:
         return retry_at.replace(tzinfo=None) if now.tzinfo is None else retry_at
-    if _day_completed(settings, local_now.date()):
+    if _claims(signal_path):
+        poll_at = local_now + timedelta(seconds=CLAIM_POLL_SECONDS)
+        return poll_at.replace(tzinfo=None) if now.tzinfo is None else poll_at
+    if _day_completed(settings, scheduled_today):
         return scheduled_today + timedelta(days=1)
     return scheduled_today
 
@@ -177,40 +195,6 @@ def _claims(signal_path: Path) -> list[Path]:
     return sorted(owned, key=lambda path: path.name)
 
 
-def _reconcile_claims(
-    signal_path: Path,
-    settings,
-    now: datetime,
-) -> bool:
-    timezone = ZoneInfo(settings.timezone)
-    for claim in _claims(signal_path):
-        claimed_at = _parse_datetime(
-            _read_json(claim).get("claimed_at"),
-            timezone,
-        )
-        if (
-            claimed_at is not None
-            and now - claimed_at < timedelta(seconds=10)
-        ):
-            return False
-        flow_lock = (
-            Path(settings.runtime_root)
-            / "runtime"
-            / "financeiro_medicao.lock"
-        )
-        try:
-            with file_lock(flow_lock, wait_seconds=0):
-                pass
-        except LockUnavailable:
-            return False
-        if signal_path.exists():
-            claim.unlink(missing_ok=True)
-        else:
-            os.replace(claim, signal_path)
-        _fsync_directory(signal_path.parent)
-    return True
-
-
 def request_run(
     settings,
     scheduled_for: datetime,
@@ -221,16 +205,20 @@ def request_run(
     timezone = ZoneInfo(settings.timezone)
     scheduled_for = _local(scheduled_for, timezone)
     now = _local(now, timezone)
-    if _day_completed(settings, scheduled_for.date()):
+    if _day_completed(settings, scheduled_for):
         return
     with file_lock(claim_lock, wait_seconds=0):
-        if not _reconcile_claims(signal_path, settings, now):
+        if _claims(signal_path):
             return
         if not signal_path.exists():
+            event_id, _ = runner.scheduled_event_identity(
+                scheduled_for
+            )
             _atomic_write(
                 signal_path,
                 {
                     "schema_version": 1,
+                    "event_id": event_id,
                     "scheduled_for": scheduled_for.isoformat(),
                     "attempt": 0,
                     "next_attempt_at": now.isoformat(),
@@ -246,8 +234,11 @@ def _claim_if_due(
     timezone = ZoneInfo(settings.timezone)
     now = _local(now, timezone)
     with file_lock(claim_lock, wait_seconds=0):
-        if not _reconcile_claims(signal_path, settings, now):
-            return None
+        claims = _claims(signal_path)
+        if claims:
+            claim = claims[0]
+            payload = _read_json(claim)
+            return claim, payload
         if not signal_path.exists():
             return None
         payload = _read_json(signal_path)
@@ -259,7 +250,16 @@ def _claim_if_due(
             payload.get("scheduled_for"),
             timezone,
         )
-        if next_attempt is None or scheduled_for is None:
+        event_id, _ = (
+            runner.scheduled_event_identity(scheduled_for)
+            if scheduled_for is not None
+            else ("", "")
+        )
+        if (
+            next_attempt is None
+            or scheduled_for is None
+            or payload.get("event_id") != event_id
+        ):
             signal_path.unlink(missing_ok=True)
             _fsync_directory(signal_path.parent)
             logger.error(
@@ -284,6 +284,16 @@ def _finish_claim(claim: Path) -> None:
     _fsync_directory(claim.parent)
 
 
+def _quarantine_corrupt_journal(
+    settings,
+    event_id: str,
+) -> Path | None:
+    return runner.quarantine_event_result(
+        settings.runtime_root,
+        event_id,
+    )
+
+
 def _write_watermark(
     settings,
     scheduled_for: datetime,
@@ -291,8 +301,10 @@ def _write_watermark(
     error_code: str = "",
 ) -> None:
     _, watermark_path, _ = _runtime_paths(settings)
+    event_id, _ = runner.scheduled_event_identity(scheduled_for)
     payload = {
         "schema_version": 1,
+        "event_id": event_id,
         "local_date": scheduled_for.date().isoformat(),
         "scheduled_for": scheduled_for.isoformat(),
         "outcome": outcome,
@@ -323,6 +335,7 @@ def _restore_retry(
     attempt = int(payload.get("attempt", 0)) + 1
     retry = {
         "schema_version": 1,
+        "event_id": payload["event_id"],
         "scheduled_for": payload["scheduled_for"],
         "attempt": attempt,
         "next_attempt_at": (
@@ -332,6 +345,10 @@ def _restore_retry(
     with file_lock(claim_lock, wait_seconds=0):
         if not signal_path.exists():
             _atomic_write(signal_path, retry)
+        runner.event_result_path(
+            settings.runtime_root,
+            payload["event_id"],
+        ).unlink(missing_ok=True)
         _finish_claim(claim)
 
 
@@ -356,43 +373,120 @@ def run_signal_if_due(
     if scheduled_for is None:
         _finish_claim(claim)
         return None
-    if _day_completed(settings, scheduled_for.date()):
+    event_id, _ = runner.scheduled_event_identity(scheduled_for)
+    if signal.get("event_id") != event_id:
         _finish_claim(claim)
-        return True
-
+        return None
     try:
-        result = runner.run_once(
-            day=scheduled_for.date(),
-            scheduled_for=scheduled_for,
-        )
-    except ValueError:
-        result = {"success": False, "error_code": "CONFIG_INVALID"}
-    except Exception:
-        result = {"success": False, "error_code": "UNEXPECTED_ERROR"}
+        with runner.event_owner_lock(
+            settings.runtime_root,
+            event_id,
+            wait_seconds=0,
+        ):
+            signal_path, _, _ = _runtime_paths(settings)
+            if signal_path.exists():
+                _finish_claim(claim)
+                return None
+            journal_corrupt = False
+            try:
+                result = runner.read_event_result(
+                    settings.runtime_root,
+                    event_id,
+                    scheduled_for,
+                )
+            except ValueError:
+                journal_corrupt = True
+                result = None
+            if result is None:
+                try:
+                    result = runner.reconcile_published_event(
+                        settings,
+                        event_id,
+                        scheduled_for,
+                    )
+                except LockUnavailable:
+                    result = {
+                        "success": False,
+                        "error_code": "LOCKED",
+                    }
+                except runner.BundleCollisionError:
+                    result = {
+                        "success": False,
+                        "error_code": "BUNDLE_COLLISION",
+                    }
+                except ValueError:
+                    result = {
+                        "success": False,
+                        "error_code": "CONFIG_INVALID",
+                    }
+            if result is None and journal_corrupt:
+                _quarantine_corrupt_journal(
+                    settings,
+                    event_id,
+                )
+            if result is None:
+                try:
+                    result = runner.run_once(
+                        settings=settings,
+                        day=scheduled_for.date(),
+                        scheduled_for=scheduled_for,
+                        event_id=event_id,
+                    )
+                except ValueError:
+                    result = {
+                        "success": False,
+                        "error_code": "CONFIG_INVALID",
+                    }
+                except Exception:
+                    result = {
+                        "success": False,
+                        "error_code": "UNEXPECTED_ERROR",
+                    }
 
-    if result.get("success") is True:
-        _write_watermark(settings, scheduled_for, "success")
-        _finish_claim(claim)
-        logger.info("[financeiro_medicao] Coleta agendada concluída.")
-        return True
+            if result.get("success") is True:
+                _write_watermark(
+                    settings,
+                    scheduled_for,
+                    "success",
+                )
+                _finish_claim(claim)
+                logger.info(
+                    "[financeiro_medicao] Coleta agendada concluída."
+                )
+                return True
 
-    error_code = _error_code(result)
-    attempt = int(signal.get("attempt", 0)) + 1
-    if (
-        error_code in TRANSIENT_ERRORS
-        and not (error_code == "UNEXPECTED_ERROR" and attempt >= 3)
-    ):
-        _restore_retry(settings, claim, signal, now)
-        logger.warning(
-            "[financeiro_medicao] Retry agendado; "
-            f"error_code={error_code}."
-        )
-        return False
+            error_code = _error_code(result)
+            attempt = int(signal.get("attempt", 0)) + 1
+            if (
+                error_code in TRANSIENT_ERRORS
+                and not (
+                    error_code == "UNEXPECTED_ERROR"
+                    and attempt >= 3
+                )
+            ):
+                _restore_retry(
+                    settings,
+                    claim,
+                    signal,
+                    now,
+                )
+                logger.warning(
+                    "[financeiro_medicao] Retry agendado; "
+                    f"error_code={error_code}."
+                )
+                return False
 
-    _write_watermark(settings, scheduled_for, "terminal", error_code)
-    _finish_claim(claim)
-    logger.warning(
-        "[financeiro_medicao] Tentativa encerrada; "
-        f"error_code={error_code}."
-    )
-    return False
+            _write_watermark(
+                settings,
+                scheduled_for,
+                "terminal",
+                error_code,
+            )
+            _finish_claim(claim)
+            logger.warning(
+                "[financeiro_medicao] Tentativa encerrada; "
+                f"error_code={error_code}."
+            )
+            return False
+    except (LockUnavailable, ValueError):
+        return None

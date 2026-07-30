@@ -1,16 +1,22 @@
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
+import inspect
 import json
 import os
 from pathlib import Path
+import stat
 from types import SimpleNamespace
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
 from flows.common.locks import LockUnavailable, file_lock
-from flows.financeiro_medicao.bundle import BundleDurabilityError
+from flows.financeiro_medicao.bundle import (
+    BundleCollisionError,
+    BundleDurabilityError,
+)
 from flows.financeiro_medicao.loga import CollectionError
+from flows.financeiro_medicao import events, runner
 from flows.financeiro_medicao.runner import run_once
 from flows.financeiro_medicao.workbook import WorkbookInvalid
 
@@ -68,6 +74,299 @@ class FinanceiroMedicaoRunnerTests(unittest.TestCase):
         }
         arguments.update(overrides)
         return run_once(**arguments)
+
+    def _write_event_journal(self, event_id, payload):
+        path = runner.event_result_path(self.runtime_root, event_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "event_id": event_id,
+                    "scheduled_for": self.moment.isoformat(),
+                    "payload": payload,
+                }
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    def _terminal_payload(self):
+        return {
+            "success": False,
+            "error_code": "AUTH_EXPIRED",
+            "run_id": None,
+            "cycle_id": "2026-07-11--2026-08-10",
+            "mode": "current",
+            "started_at": self.moment.isoformat(),
+            "finished_at": self.moment.isoformat(),
+            "next_scheduled_for": None,
+        }
+
+    def test_scheduled_identity_is_stable_and_timezone_sensitive(self):
+        self.assertTrue(
+            hasattr(runner, "scheduled_event_identity"),
+            "runner must expose deterministic scheduled identity",
+        )
+        same = runner.scheduled_event_identity(self.moment)
+        repeated = runner.scheduled_event_identity(self.moment)
+        utc = runner.scheduled_event_identity(
+            self.moment.astimezone(timezone.utc)
+        )
+
+        self.assertEqual(same, repeated)
+        self.assertNotEqual(same, utc)
+        self.assertRegex(same[0], r"^[0-9a-f]{32}$")
+        self.assertRegex(same[1], r"^[0-9a-f]{32}$")
+        self.assertNotEqual(same[0], same[1])
+
+    def test_scheduled_result_journal_is_durable_before_flow_unlock(self):
+        self.assertIn(
+            "event_id",
+            inspect.signature(run_once).parameters,
+            "scheduled run must accept an event identity",
+        )
+        event_id, _ = runner.scheduled_event_identity(self.moment)
+        journal = (
+            self.runtime_root
+            / "runtime"
+            / "events"
+            / f"{event_id}.result.json"
+        )
+        flow_unlock_observations = []
+
+        @contextmanager
+        def recording_lock(path, *, wait_seconds):
+            try:
+                yield
+            finally:
+                if Path(path).name == "financeiro_medicao.lock":
+                    flow_unlock_observations.append(journal.exists())
+
+        with patch(
+            "flows.financeiro_medicao.runner.file_lock",
+            side_effect=recording_lock,
+        ):
+            payload = self._run_once(
+                Mock(side_effect=CollectionError("AUTH_EXPIRED")),
+                event_id=event_id,
+                scheduled_for=self.moment,
+            )
+
+        persisted = json.loads(journal.read_text(encoding="utf-8"))
+        self.assertEqual(set(payload), PAYLOAD_KEYS)
+        self.assertEqual(
+            persisted,
+            {
+                "schema_version": 1,
+                "event_id": event_id,
+                "scheduled_for": self.moment.isoformat(),
+                "payload": payload,
+            },
+        )
+        self.assertEqual(flow_unlock_observations, [True])
+
+    def test_inconsistent_scheduled_bundle_is_journaled_as_terminal(self):
+        event_id, run_id = runner.scheduled_event_identity(self.moment)
+        published = self.runtime_root / "inbox" / run_id
+        with patch.object(
+            events,
+            "inspect_published_bundle",
+            side_effect=BundleCollisionError(published),
+        ):
+            try:
+                payload = runner.reconcile_published_event(
+                    self.settings,
+                    event_id,
+                    self.moment,
+                )
+            except BundleCollisionError:
+                self.fail(
+                    "deterministic collision must become a terminal journal"
+                )
+
+        self.assertEqual(payload["error_code"], "BUNDLE_COLLISION")
+        self.assertFalse(payload["success"])
+        self.assertEqual(set(payload), PAYLOAD_KEYS)
+        persisted = runner.read_event_result(
+            self.runtime_root,
+            event_id,
+            self.moment,
+        )
+        self.assertEqual(persisted, payload)
+
+    def test_event_journal_rejects_semantically_invalid_payloads(self):
+        event_id, run_id = runner.scheduled_event_identity(self.moment)
+        cases = {
+            "success-with-error": {"success": True},
+            "failure-without-error": {"error_code": ""},
+            "unknown-error": {"error_code": "SECRET_INTERNAL_ERROR"},
+            "wrong-cycle": {"cycle_id": "2026-01-01--2026-01-31"},
+            "wrong-mode": {"mode": "closed"},
+            "naive-start": {
+                "started_at": self.moment.replace(tzinfo=None).isoformat()
+            },
+            "finish-before-start": {
+                "finished_at": (
+                    self.moment - timedelta(seconds=1)
+                ).isoformat()
+            },
+            "invalid-next": {"next_scheduled_for": "tomorrow"},
+            "next-before-finish": {
+                "next_scheduled_for": self.moment.isoformat()
+            },
+            "arbitrary-run-id": {"run_id": "run-from-another-event"},
+            "unrecognized-partial-publication": {"run_id": run_id},
+            "bool-cycle": {"cycle_id": True},
+        }
+
+        for name, changes in cases.items():
+            with self.subTest(name=name):
+                payload = self._terminal_payload()
+                payload.update(changes)
+                self._write_event_journal(event_id, payload)
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "Invalid event result journal",
+                ):
+                    runner.read_event_result(
+                        self.runtime_root,
+                        event_id,
+                        self.moment,
+                    )
+
+        path = self._write_event_journal(
+            event_id,
+            self._terminal_payload(),
+        )
+        journal = json.loads(path.read_text(encoding="utf-8"))
+        journal["untrusted"] = True
+        path.write_text(json.dumps(journal), encoding="utf-8")
+        with self.assertRaisesRegex(
+            ValueError,
+            "Invalid event result journal",
+        ):
+            runner.read_event_result(
+                self.runtime_root,
+                event_id,
+                self.moment,
+            )
+
+    def test_success_journal_requires_matching_validated_bundle(self):
+        event_id, run_id = runner.scheduled_event_identity(self.moment)
+        payload = self._terminal_payload()
+        payload.update(
+            success=True,
+            error_code="",
+            run_id=run_id,
+        )
+        self._write_event_journal(event_id, payload)
+        published = self.runtime_root / "inbox" / run_id
+        details = runner.PublishedBundleDetails(
+            path=published,
+            manifest={},
+            workbook_size=1,
+            workbook_sha256="0" * 64,
+        )
+
+        with patch.object(
+            events,
+            "inspect_published_bundle",
+            return_value=details,
+        ) as inspect_bundle:
+            result = runner.read_event_result(
+                self.runtime_root,
+                event_id,
+                self.moment,
+            )
+
+        self.assertEqual(result, payload)
+        self.assertEqual(
+            inspect_bundle.call_args.kwargs["run_id"],
+            run_id,
+        )
+        self.assertEqual(
+            inspect_bundle.call_args.kwargs["scheduled_for"],
+            self.moment,
+        )
+        self.assertEqual(
+            inspect_bundle.call_args.kwargs["expected_result"],
+            payload,
+        )
+
+        with patch.object(
+            events,
+            "inspect_published_bundle",
+            return_value=None,
+        ), self.assertRaisesRegex(
+            ValueError,
+            "Invalid event result journal",
+        ):
+            runner.read_event_result(
+                self.runtime_root,
+                event_id,
+                self.moment,
+            )
+
+    def test_scheduled_success_uses_proof_after_immediate_consumption(self):
+        event_id, run_id = runner.scheduled_event_identity(self.moment)
+        consumed = Path(self.temporary.name) / "consumed" / run_id
+        manifest = {
+            "run_id": run_id,
+            "cycle_id": "2026-07-11--2026-08-10",
+            "mode": "current",
+            "started_at": self.moment.isoformat(),
+            "finished_at": self.moment.isoformat(),
+        }
+        details = runner.PublishedBundleDetails(
+            path=self.runtime_root / "runtime" / "proofs" / run_id,
+            manifest=manifest,
+            workbook_size=1,
+            workbook_sha256="0" * 64,
+        )
+
+        def collector(_page, _window, _settings, destination):
+            destination.write_bytes(b"download")
+            return destination
+
+        def consume_immediately(**arguments):
+            published = arguments["runtime_root"] / "inbox" / run_id
+            published.mkdir(parents=True)
+            consumed.parent.mkdir()
+            os.replace(published, consumed)
+            return published
+
+        with patch.object(
+            runner,
+            "inspect_committed_publication",
+            return_value=details,
+        ) as inspect_proof:
+            payload = self._run_once(
+                collector,
+                bundle_builder=consume_immediately,
+                event_id=event_id,
+                scheduled_for=self.moment,
+            )
+
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["run_id"], run_id)
+        inspect_proof.assert_called_once()
+
+    def test_transient_lock_journal_is_semantically_valid(self):
+        event_id, _ = runner.scheduled_event_identity(self.moment)
+        payload = self._terminal_payload()
+        payload["error_code"] = "LOCKED"
+        self._write_event_journal(event_id, payload)
+
+        self.assertEqual(
+            runner.read_event_result(
+                self.runtime_root,
+                event_id,
+                self.moment,
+            ),
+            payload,
+        )
 
     def test_auth_failure_does_not_retry_and_writes_exact_safe_payload(self):
         secret = "https://user:password@example.invalid/path?token=secret"
@@ -420,6 +719,197 @@ class FinanceiroMedicaoRunnerTests(unittest.TestCase):
             list(self.runtime_root.glob(".done.json.*.tmp")),
             [],
         )
+
+    def test_event_directory_is_durable_before_journal_publication(self):
+        self.runtime_root.mkdir()
+        runtime = self.runtime_root / "runtime"
+        runtime.mkdir()
+        event_id, _ = runner.scheduled_event_identity(self.moment)
+        target = runner.event_result_path(self.runtime_root, event_id)
+        operations = []
+        original_replace = os.replace
+
+        def record_sync(path):
+            operations.append(("directory-fsync", Path(path).name))
+
+        def record_file_sync(_descriptor):
+            operations.append(("file-fsync",))
+
+        def record_replace(source, destination):
+            operations.append(("replace", Path(destination).name))
+            original_replace(source, destination)
+
+        with patch.object(
+            events,
+            "fsync_directory",
+            side_effect=record_sync,
+        ), patch.object(
+            runner.os,
+            "fsync",
+            side_effect=record_file_sync,
+        ), patch.object(
+            runner.os,
+            "replace",
+            side_effect=record_replace,
+        ):
+            runner._atomic_json_write(target, {"status": "terminal"})
+
+        self.assertEqual(
+            operations,
+            [
+                ("directory-fsync", "events"),
+                ("directory-fsync", "runtime"),
+                ("file-fsync",),
+                ("replace", target.name),
+                ("directory-fsync", "events"),
+            ],
+        )
+
+    def test_event_parent_sync_failure_never_publishes_journal(self):
+        self.runtime_root.mkdir()
+        runtime = self.runtime_root / "runtime"
+        runtime.mkdir()
+        event_id, _ = runner.scheduled_event_identity(self.moment)
+        target = runner.event_result_path(self.runtime_root, event_id)
+
+        def fail_runtime_sync(path):
+            if Path(path) == runtime:
+                raise OSError("runtime fsync failed")
+
+        with patch.object(
+            events,
+            "fsync_directory",
+            side_effect=fail_runtime_sync,
+        ), patch.object(runner.os, "replace") as replace:
+            with self.assertRaisesRegex(OSError, "runtime fsync failed"):
+                runner._atomic_json_write(target, {"status": "terminal"})
+
+        replace.assert_not_called()
+        self.assertFalse(target.exists())
+
+    def test_event_directory_reparse_is_rejected_before_write(self):
+        self.runtime_root.mkdir()
+        runtime = self.runtime_root / "runtime"
+        events = runtime / "events"
+        events.mkdir(parents=True)
+        event_id, _ = runner.scheduled_event_identity(self.moment)
+        target = runner.event_result_path(
+            self.runtime_root,
+            event_id,
+        )
+        original_lstat = Path.lstat
+
+        def report_events_reparse(path):
+            metadata = original_lstat(path)
+            if Path(path) == events:
+                values = list(metadata)
+                values[0] = stat.S_IFLNK | 0o777
+                return os.stat_result(values)
+            return metadata
+
+        with patch.object(
+            Path,
+            "lstat",
+            new=report_events_reparse,
+        ), patch.object(runner.os, "replace") as replace:
+            with self.assertRaises(ValueError):
+                runner._atomic_json_write(
+                    target,
+                    {"status": "terminal"},
+                )
+
+        replace.assert_not_called()
+
+    def test_event_journal_simulated_symlink_is_rejected(self):
+        event_id, _ = runner.scheduled_event_identity(self.moment)
+        payload = self._terminal_payload()
+        journal = self._write_event_journal(event_id, payload)
+        original_lstat = Path.lstat
+
+        def report_journal_symlink(path):
+            metadata = original_lstat(path)
+            if Path(path) == journal:
+                values = list(metadata)
+                values[0] = stat.S_IFLNK | 0o777
+                return os.stat_result(values)
+            return metadata
+
+        with patch.object(
+            Path,
+            "lstat",
+            new=report_journal_symlink,
+        ), self.assertRaisesRegex(
+            ValueError,
+            "Invalid event result journal",
+        ):
+            runner.read_event_result(
+                self.runtime_root,
+                event_id,
+                self.moment,
+            )
+
+    def test_quarantine_rejects_simulated_journal_symlink(self):
+        event_id, _ = runner.scheduled_event_identity(self.moment)
+        journal = self._write_event_journal(
+            event_id,
+            self._terminal_payload(),
+        )
+        original_lstat = Path.lstat
+
+        def report_journal_symlink(path):
+            metadata = original_lstat(path)
+            if Path(path) == journal:
+                values = list(metadata)
+                values[0] = stat.S_IFLNK | 0o777
+                return os.stat_result(values)
+            return metadata
+
+        with patch.object(
+            Path,
+            "lstat",
+            new=report_journal_symlink,
+        ), patch.object(runner.os, "replace") as replace:
+            with self.assertRaises(ValueError):
+                runner.quarantine_event_result(
+                    self.runtime_root,
+                    event_id,
+                )
+
+        replace.assert_not_called()
+
+    def test_posix_journal_symlink_is_rejected_when_available(self):
+        event_id, _ = runner.scheduled_event_identity(self.moment)
+        journal = runner.event_result_path(
+            self.runtime_root,
+            event_id,
+        )
+        journal.parent.mkdir(parents=True)
+        outside = self.runtime_root / "outside.json"
+        outside.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "event_id": event_id,
+                    "scheduled_for": self.moment.isoformat(),
+                    "payload": self._terminal_payload(),
+                }
+            ),
+            encoding="utf-8",
+        )
+        try:
+            journal.symlink_to(outside)
+        except OSError as error:
+            self.skipTest(f"symlinks unavailable: {error}")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "Invalid event result journal",
+        ):
+            runner.read_event_result(
+                self.runtime_root,
+                event_id,
+                self.moment,
+            )
 
     def test_next_schedule_uses_configured_timezone(self):
         self.settings.schedule_enabled = True

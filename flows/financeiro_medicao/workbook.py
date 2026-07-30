@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from datetime import date, datetime
+from contextlib import nullcontext
 from pathlib import Path
 from xml.etree.ElementTree import ParseError
 from zipfile import BadZipFile, ZipFile
@@ -71,25 +72,46 @@ def _validate_archive(stream):
             names.add(entry.filename)
 
 
-def validate_workbook(path, query_start, query_end):
+def validate_workbook(path_or_stream, query_start, query_end):
     start = _as_date(query_start)
     end = _as_date(query_end)
     if start is None or end is None or start > end:
         raise WorkbookInvalid("Período de consulta inválido.")
 
-    workbook_path = Path(path)
-    try:
-        size = workbook_path.stat().st_size
-    except OSError as error:
-        raise WorkbookInvalid("Arquivo de medição inválido.") from error
+    is_stream = all(
+        callable(getattr(path_or_stream, name, None))
+        for name in ("read", "seek", "tell")
+    )
+    if is_stream:
+        stream = path_or_stream
+        try:
+            stream.seek(0, 2)
+            size = stream.tell()
+            stream.seek(0)
+        except (OSError, ValueError, TypeError) as error:
+            raise WorkbookInvalid(
+                "Arquivo de medição inválido."
+            ) from error
+        stream_context = nullcontext(stream)
+    else:
+        workbook_path = Path(path_or_stream)
+        try:
+            size = workbook_path.stat().st_size
+        except OSError as error:
+            raise WorkbookInvalid(
+                "Arquivo de medição inválido."
+            ) from error
+        if not workbook_path.is_file():
+            raise WorkbookInvalid("Arquivo de medição inválido.")
+        stream_context = workbook_path.open("rb")
 
-    if not workbook_path.is_file() or not 0 < size <= MAX_WORKBOOK_BYTES:
+    if not 0 < size <= MAX_WORKBOOK_BYTES:
         raise WorkbookInvalid("Arquivo de medição inválido.")
 
     workbook = None
     rows = None
     try:
-        with workbook_path.open("rb") as stream:
+        with stream_context as stream:
             _validate_archive(stream)
             stream.seek(0)
             workbook = load_workbook(stream, read_only=True, data_only=True)

@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -92,6 +93,25 @@ class FinanceiroMedicaoWorkbookTests(unittest.TestCase):
         self.assertEqual(info.row_count, 1)
         self.assertEqual(info.headers, REQUIRED_HEADERS)
         self.assertGreater(info.size, 0)
+
+    def test_accepts_seekable_binary_stream_without_closing_it(self):
+        with TemporaryDirectory() as directory:
+            path = self.make_workbook(
+                directory,
+                rows=(CANONICAL_ROW,),
+            )
+            stream = BytesIO(path.read_bytes())
+
+            info = validate_workbook(
+                stream,
+                date(2026, 7, 11),
+                date(2026, 7, 31),
+            )
+
+        self.assertEqual(info.row_count, 1)
+        self.assertFalse(stream.closed)
+        stream.seek(0)
+        self.assertEqual(stream.read(2), b"PK")
 
     def test_accepts_highly_compressible_valid_workbook(self):
         rows = []

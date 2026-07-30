@@ -46,25 +46,17 @@ def _is_contention(error: OSError) -> bool:
 
 
 @contextmanager
-def file_lock(
-    path: Path,
+def descriptor_lock(
+    descriptor: int,
     *,
     wait_seconds: float,
     poll_seconds: float = 1.0,
 ):
-    """Hold a crash-safe cross-process lock on ``path``'s descriptor."""
+    """Hold a crash-safe cross-process lock on an open descriptor."""
     wait_seconds = float(wait_seconds)
     poll_seconds = float(poll_seconds)
     if wait_seconds < 0 or poll_seconds <= 0:
         raise ValueError("Invalid lock timing.")
-
-    lock_path = Path(path)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(
-        lock_path,
-        os.O_CREAT | os.O_RDWR,
-        0o600,
-    )
     acquired = False
     deadline = time.monotonic() + wait_seconds
     try:
@@ -82,8 +74,31 @@ def file_lock(
                 time.sleep(min(poll_seconds, remaining))
         yield
     finally:
-        try:
-            if acquired:
-                _unlock_descriptor(descriptor)
-        finally:
-            os.close(descriptor)
+        if acquired:
+            _unlock_descriptor(descriptor)
+
+
+@contextmanager
+def file_lock(
+    path: Path,
+    *,
+    wait_seconds: float,
+    poll_seconds: float = 1.0,
+):
+    """Hold a crash-safe cross-process lock on ``path``'s descriptor."""
+    lock_path = Path(path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(
+        lock_path,
+        os.O_CREAT | os.O_RDWR,
+        0o600,
+    )
+    try:
+        with descriptor_lock(
+            descriptor,
+            wait_seconds=wait_seconds,
+            poll_seconds=poll_seconds,
+        ):
+            yield
+    finally:
+        os.close(descriptor)
