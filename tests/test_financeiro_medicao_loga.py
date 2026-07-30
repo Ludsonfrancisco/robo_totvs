@@ -3,6 +3,8 @@ from html.parser import HTMLParser
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
+from uuid import UUID
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
@@ -95,10 +97,18 @@ class _Locator:
 
 
 class _Download:
-    def __init__(self, payload=b"workbook", *, fails=False, omit=False):
+    def __init__(
+        self,
+        payload=b"workbook",
+        *,
+        fails=False,
+        omit=False,
+        competing_destination=None,
+    ):
         self.payload = payload
         self.fails = fails
         self.omit = omit
+        self.competing_destination = competing_destination
         self.saved_to = None
 
     def save_as(self, destination):
@@ -107,6 +117,8 @@ class _Download:
             raise RuntimeError("falha simulada sem dados sensíveis")
         if not self.omit:
             self.saved_to.write_bytes(self.payload)
+        if self.competing_destination is not None:
+            self.competing_destination.write_bytes(b"concorrente")
 
 
 class _DownloadInfo:
@@ -307,7 +319,10 @@ class FinanceiroMedicaoCollectionTests(unittest.TestCase):
                 page.expect_download_calls,
                 [{"timeout": 120_000}],
             )
-            self.assertEqual(page.download.saved_to, destination)
+            self.assertEqual(page.download.saved_to.parent, destination.parent)
+            self.assertNotEqual(page.download.saved_to, destination)
+            self.assertFalse(page.download.saved_to.exists())
+            UUID(page.download.saved_to.name.split(".")[-2])
 
     def test_collect_does_not_open_filters_when_dates_are_visible(self):
         with TemporaryDirectory() as temp_dir:
@@ -423,6 +438,51 @@ class FinanceiroMedicaoCollectionTests(unittest.TestCase):
 
             self.assertEqual(destination.read_bytes(), b"original")
             self.assertEqual(page.goto_calls, [])
+
+    def test_destination_created_during_download_is_preserved(self):
+        with TemporaryDirectory() as temp_dir:
+            destination = Path(temp_dir) / "medicao.xlsx"
+            download = _Download(competing_destination=destination)
+            page = _Page(download=download)
+
+            with self.assertRaisesRegex(
+                CollectionError, "DOWNLOAD_FAILED"
+            ):
+                collect(
+                    page,
+                    window_for(date(2026, 7, 30)),
+                    _Settings(),
+                    destination,
+                )
+
+            self.assertEqual(destination.read_bytes(), b"concorrente")
+            self.assertNotEqual(download.saved_to, destination)
+            self.assertFalse(download.saved_to.exists())
+            self.assertEqual(list(destination.parent.iterdir()), [destination])
+
+    def test_unsupported_atomic_link_fails_and_cleans_only_temp(self):
+        with TemporaryDirectory() as temp_dir:
+            destination = Path(temp_dir) / "medicao.xlsx"
+            download = _Download()
+
+            with patch(
+                "os.link",
+                side_effect=OSError("hard link indisponível"),
+            ):
+                with self.assertRaisesRegex(
+                    CollectionError, "DOWNLOAD_FAILED"
+                ):
+                    collect(
+                        _Page(download=download),
+                        window_for(date(2026, 7, 30)),
+                        _Settings(),
+                        destination,
+                    )
+
+            self.assertFalse(destination.exists())
+            self.assertIsNotNone(download.saved_to)
+            self.assertFalse(download.saved_to.exists())
+            self.assertEqual(list(destination.parent.iterdir()), [])
 
     def test_missing_destination_parent_is_rejected(self):
         with TemporaryDirectory() as temp_dir:

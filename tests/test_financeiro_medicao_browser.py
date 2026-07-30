@@ -4,12 +4,14 @@ from types import SimpleNamespace
 import os
 import unittest
 from unittest.mock import patch
+from uuid import UUID
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from flows.financeiro_medicao.browser import (
     _ensure_authenticated,
     _is_authenticated,
+    _save_storage_state,
     authenticated_page,
 )
 from flows.financeiro_medicao.config import Settings
@@ -109,8 +111,16 @@ class _Page:
 
 
 class _Context:
-    def __init__(self, page=None):
+    def __init__(
+        self,
+        page=None,
+        *,
+        events=None,
+        storage_error=False,
+    ):
         self.page = page
+        self.events = events
+        self.storage_error = storage_error
         self.saved_paths = []
         self.closed = False
 
@@ -119,8 +129,14 @@ class _Context:
 
     def storage_state(self, *, path):
         target = Path(path)
+        if self.events is not None:
+            self.events.append(("storage_state", target))
+        if not target.exists():
+            raise AssertionError("storage state temporário não foi pré-criado")
         target.write_text('{"cookies": []}', encoding="utf-8")
         self.saved_paths.append(target)
+        if self.storage_error:
+            raise RuntimeError("storage failure")
 
     def close(self):
         self.closed = True
@@ -240,12 +256,18 @@ class FinanceiroMedicaoBrowserTests(unittest.TestCase):
                     (settings.loga_url, {"wait_until": "networkidle"}),
                 ],
             )
-            expected_temp = settings.storage_state_path.with_name(
-                settings.storage_state_path.name + ".tmp"
+            self.assertEqual(len(context.saved_paths), 1)
+            temporary = context.saved_paths[0]
+            self.assertEqual(temporary.parent, settings.storage_state_path.parent)
+            self.assertNotEqual(
+                temporary,
+                settings.storage_state_path.with_name(
+                    settings.storage_state_path.name + ".tmp"
+                ),
             )
-            self.assertEqual(context.saved_paths, [expected_temp])
+            UUID(temporary.name.split(".")[-2])
             self.assertTrue(settings.storage_state_path.is_file())
-            self.assertFalse(expected_temp.exists())
+            self.assertFalse(temporary.exists())
             self.assertNotEqual(
                 settings.storage_state_path,
                 runtime_root.parent
@@ -258,6 +280,66 @@ class FinanceiroMedicaoBrowserTests(unittest.TestCase):
                     settings.storage_state_path.stat().st_mode & 0o777,
                     0o600,
                 )
+
+    def test_storage_state_temp_is_exclusive_and_restricted_before_write(self):
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            destination = directory / "loga-storage-state.json"
+            events = []
+            context = _Context(events=events)
+            real_open = os.open
+            real_chmod = os.chmod
+
+            def recording_open(path, flags, mode):
+                events.append(("open", Path(path), flags, mode))
+                return real_open(path, flags, mode)
+
+            def recording_chmod(path, mode):
+                events.append(("chmod", Path(path), mode))
+                return real_chmod(path, mode)
+
+            with (
+                patch(
+                    "flows.financeiro_medicao.browser.os.open",
+                    side_effect=recording_open,
+                ),
+                patch(
+                    "flows.financeiro_medicao.browser.os.chmod",
+                    side_effect=recording_chmod,
+                ),
+            ):
+                _save_storage_state(context, destination)
+
+            self.assertEqual(
+                [event[0] for event in events[:3]],
+                ["open", "chmod", "storage_state"],
+            )
+            open_event = events[0]
+            self.assertEqual(
+                open_event[2] & (os.O_CREAT | os.O_EXCL | os.O_WRONLY),
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            )
+            self.assertEqual(open_event[3], 0o600)
+            temporary = context.saved_paths[0]
+            UUID(temporary.name.split(".")[-2])
+            self.assertFalse(temporary.exists())
+            self.assertTrue(destination.is_file())
+
+    def test_storage_state_failure_preserves_final_and_removes_uuid_temp(self):
+        with TemporaryDirectory() as temp_dir:
+            destination = Path(temp_dir) / "loga-storage-state.json"
+            destination.write_bytes(b"original")
+            context = _Context(storage_error=True)
+
+            with self.assertRaisesRegex(RuntimeError, "storage"):
+                _save_storage_state(context, destination)
+
+            self.assertEqual(destination.read_bytes(), b"original")
+            self.assertEqual(len(context.saved_paths), 1)
+            temporary = context.saved_paths[0]
+            self.assertNotEqual(temporary, destination)
+            self.assertFalse(temporary.exists())
+            self.assertEqual(list(destination.parent.iterdir()), [destination])
 
     def test_missing_credentials_form_or_rejection_maps_to_auth_expired(self):
         cases = (

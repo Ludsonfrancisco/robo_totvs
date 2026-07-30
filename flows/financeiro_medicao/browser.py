@@ -1,6 +1,7 @@
 from contextlib import contextmanager
 import os
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 from playwright.sync_api import (
     TimeoutError as PlaywrightTimeoutError,
@@ -20,20 +21,31 @@ def _is_authenticated(page) -> bool:
 
 def _save_storage_state(context, storage_state_path) -> None:
     temporary = storage_state_path.with_name(
-        storage_state_path.name + ".tmp"
+        f".{storage_state_path.name}.{uuid4().hex}.tmp"
     )
+    descriptor = None
     try:
+        descriptor = os.open(
+            temporary,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            0o600,
+        )
+        os.close(descriptor)
+        descriptor = None
+        os.chmod(temporary, 0o600)
         context.storage_state(path=str(temporary))
         os.chmod(temporary, 0o600)
-        try:
-            with temporary.open("r+b") as state_file:
-                state_file.flush()
-                os.fsync(state_file.fileno())
-        except OSError:
-            pass
+        with temporary.open("r+b") as state_file:
+            state_file.flush()
+            os.fsync(state_file.fileno())
         os.replace(temporary, storage_state_path)
         os.chmod(storage_state_path, 0o600)
     finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
         try:
             temporary.unlink(missing_ok=True)
         except OSError:

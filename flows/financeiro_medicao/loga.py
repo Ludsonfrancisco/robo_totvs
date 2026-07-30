@@ -1,4 +1,6 @@
+import os
 from pathlib import Path
+from uuid import uuid4
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
@@ -27,10 +29,24 @@ def _authenticated(page) -> bool:
     )
 
 
-def _remove_invalid_download(destination: Path) -> None:
+def _temporary_download_path(destination: Path) -> Path:
+    temporary = destination.parent / (
+        f".{destination.name}.{uuid4().hex}.tmp"
+    )
+    descriptor = os.open(
+        temporary,
+        os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+        0o600,
+    )
+    os.close(descriptor)
+    return temporary
+
+
+def _remove_temporary_download(temporary: Path | None) -> None:
+    if temporary is None:
+        return
     try:
-        if destination.is_file():
-            destination.unlink()
+        temporary.unlink(missing_ok=True)
     except OSError:
         pass
 
@@ -111,23 +127,25 @@ def collect(
     ):
         raise CollectionError("FILTER_MISMATCH")
 
+    temporary = None
     try:
         with page.expect_download(timeout=DOWNLOAD_TIMEOUT_MS) as download_info:
             export_button.click()
-        download_info.value.save_as(destination)
-    except PlaywrightTimeoutError as exc:
-        _remove_invalid_download(destination)
-        raise CollectionError("DOWNLOAD_TIMEOUT") from exc
-    except Exception as exc:
-        _remove_invalid_download(destination)
-        raise CollectionError("DOWNLOAD_FAILED") from exc
-
-    try:
-        if not destination.is_file() or destination.stat().st_size == 0:
-            _remove_invalid_download(destination)
+        temporary = _temporary_download_path(destination)
+        download_info.value.save_as(temporary)
+        if not temporary.is_file() or temporary.stat().st_size == 0:
             raise CollectionError("DOWNLOAD_FAILED")
-    except OSError as exc:
-        _remove_invalid_download(destination)
+        with temporary.open("r+b") as download_file:
+            download_file.flush()
+            os.fsync(download_file.fileno())
+        os.link(temporary, destination)
+    except PlaywrightTimeoutError as exc:
+        raise CollectionError("DOWNLOAD_TIMEOUT") from exc
+    except CollectionError:
+        raise
+    except Exception as exc:
         raise CollectionError("DOWNLOAD_FAILED") from exc
+    finally:
+        _remove_temporary_download(temporary)
 
     return destination
