@@ -1,0 +1,113 @@
+import hashlib
+import json
+import os
+from datetime import datetime
+from pathlib import Path
+from shutil import rmtree
+from uuid import uuid4
+
+from .cycles import CycleWindow
+from .workbook import validate_workbook
+
+
+_CHUNK_SIZE = 1024 * 1024
+_WORKBOOK_NAME = "medicao_original.xlsx"
+_MANIFEST_NAME = "manifest.json"
+
+
+def _validate_inputs(runtime_root, scheduled_for, started_at, finished_at, image_revision):
+    root = Path(runtime_root)
+    if root.name != "financeiro_medicao":
+        raise ValueError("Diretório de execução inválido.")
+    if not isinstance(image_revision, str) or not image_revision.strip():
+        raise ValueError("Revisão da imagem inválida.")
+    timestamps = (scheduled_for, started_at, finished_at)
+    if any(not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None for value in timestamps):
+        raise ValueError("Datas de execução devem incluir fuso horário.")
+    if not scheduled_for <= started_at <= finished_at:
+        raise ValueError("Datas de execução estão fora de ordem.")
+    return root
+
+
+def _copy_with_digest(source, destination):
+    digest = hashlib.sha256()
+    size = 0
+    with Path(source).open("rb") as source_stream, destination.open("wb") as destination_stream:
+        while chunk := source_stream.read(_CHUNK_SIZE):
+            destination_stream.write(chunk)
+            digest.update(chunk)
+            size += len(chunk)
+        destination_stream.flush()
+        os.fsync(destination_stream.fileno())
+    return size, digest.hexdigest()
+
+
+def _write_manifest(path, manifest):
+    with path.open("w", encoding="utf-8", newline="\n") as stream:
+        json.dump(manifest, stream, ensure_ascii=False, separators=(",", ":"))
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def _remove_temp(temp_dir, runtime_dir):
+    try:
+        resolved_temp = temp_dir.resolve()
+        resolved_runtime = runtime_dir.resolve()
+        resolved_temp.relative_to(resolved_runtime)
+    except (OSError, ValueError):
+        return
+    if temp_dir.exists() and temp_dir.parent.resolve() == resolved_runtime and temp_dir.name.endswith(".tmp"):
+        rmtree(temp_dir)
+
+
+def build_bundle(*, runtime_root: Path, source: Path, window: CycleWindow,
+                 scheduled_for: datetime, started_at: datetime, finished_at: datetime,
+                 image_revision: str) -> Path:
+    """Validate a copied workbook and atomically publish its immutable inbox bundle."""
+    root = _validate_inputs(runtime_root, scheduled_for, started_at, finished_at, image_revision)
+    runtime_dir = root / "runtime"
+    inbox_dir = root / "inbox"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    inbox_dir.mkdir(parents=True, exist_ok=True)
+
+    run_id = uuid4().hex
+    temp_dir = runtime_dir / f"{run_id}.tmp"
+    published_dir = inbox_dir / run_id
+    temp_dir.mkdir(mode=0o700)
+    try:
+        workbook_path = temp_dir / _WORKBOOK_NAME
+        workbook_size, workbook_sha256 = _copy_with_digest(source, workbook_path)
+        workbook = validate_workbook(workbook_path, window.query_start, window.query_end)
+        if workbook.size != workbook_size:
+            raise OSError("Tamanho da cópia de medição inconsistente.")
+
+        manifest = {
+            "schema_version": 1,
+            "source": "LOGA",
+            "flow": "financeiro_medicao",
+            "run_id": run_id,
+            "cycle_id": window.cycle_id,
+            "cycle_start": window.cycle_start.isoformat(),
+            "cycle_close": window.cycle_close.isoformat(),
+            "mode": window.mode,
+            "scheduled_for": scheduled_for.isoformat(),
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "query_start": window.query_start.isoformat(),
+            "query_end": window.query_end.isoformat(),
+            "image_revision": image_revision,
+            "status": "success",
+            "workbook_file": _WORKBOOK_NAME,
+            "workbook_size": workbook_size,
+            "workbook_sha256": workbook_sha256,
+            "row_count": workbook.row_count,
+            "sheet_name": "Base Medição de Pagamento",
+            "headers": list(workbook.headers),
+        }
+        _write_manifest(temp_dir / _MANIFEST_NAME, manifest)
+        os.replace(temp_dir, published_dir)
+        return published_dir
+    except BaseException:
+        _remove_temp(temp_dir, runtime_dir)
+        raise
