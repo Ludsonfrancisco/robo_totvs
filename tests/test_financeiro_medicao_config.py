@@ -213,7 +213,7 @@ class FinanceiroMedicaoSettingsTests(unittest.TestCase):
         self.assertEqual(settings.timezone, "America/Sao_Paulo")
 
     def test_rejects_empty_or_unknown_timezone_with_context(self):
-        for timezone in ("   ", "Unknown/Timezone"):
+        for timezone in ("   ", "Unknown/Timezone", "/invalid/timezone"):
             with self.subTest(timezone=timezone):
                 with self.assertRaisesRegex(ValueError, "FINANCEIRO_MEDICAO_TIMEZONE"):
                     Settings.from_mapping(

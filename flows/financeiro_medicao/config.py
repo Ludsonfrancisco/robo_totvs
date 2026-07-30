@@ -79,7 +79,7 @@ def _timezone(values: Mapping[str, str]) -> str:
         raise ValueError("FINANCEIRO_MEDICAO_TIMEZONE inválido")
     try:
         ZoneInfo(timezone)
-    except ZoneInfoNotFoundError as error:
+    except (ZoneInfoNotFoundError, ValueError) as error:
         raise ValueError("FINANCEIRO_MEDICAO_TIMEZONE inválido") from error
     return timezone
 
