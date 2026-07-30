@@ -40,11 +40,11 @@ class FinanceiroMedicaoBundleTests(unittest.TestCase):
         workbook.close()
         return path
 
-    def build(self, runtime_root, source):
+    def build(self, runtime_root, source, *, image_revision="sha256:abc123"):
         return build_bundle(
             runtime_root=Path(runtime_root), source=source, window=self.window,
             scheduled_for=self.scheduled_for, started_at=self.started_at,
-            finished_at=self.finished_at, image_revision="sha256:abc123",
+            finished_at=self.finished_at, image_revision=image_revision,
         )
 
     def test_publishes_canonical_manifest_with_hash_of_published_workbook(self):
@@ -130,6 +130,121 @@ class FinanceiroMedicaoBundleTests(unittest.TestCase):
             self.assertNotEqual(first.name, second.name)
             self.assertTrue((first / "manifest.json").is_file())
             self.assertTrue((second / "manifest.json").is_file())
+
+    def test_normalizes_image_revision_before_writing_manifest(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "financeiro_medicao"
+            published = self.build(root, self.make_workbook(directory), image_revision="  sha256:abc123  ")
+
+            manifest = json.loads((published / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["image_revision"], "sha256:abc123")
+
+    def test_stops_workbook_copy_when_streamed_size_exceeds_limit(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "financeiro_medicao"
+            source = Path(directory) / "oversized.xlsx"
+            source.write_bytes(b"0123456789")
+            written = 0
+            original_open = Path.open
+
+            class CountingWriter:
+                def __init__(self, stream):
+                    self.stream = stream
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    self.stream.close()
+
+                def write(self, data):
+                    nonlocal written
+                    written += len(data)
+                    return self.stream.write(data)
+
+                def __getattr__(self, name):
+                    return getattr(self.stream, name)
+
+            def count_workbook_writes(path, mode="r", *args, **kwargs):
+                stream = original_open(path, mode, *args, **kwargs)
+                if path.name == "medicao_original.xlsx" and mode == "wb":
+                    return CountingWriter(stream)
+                return stream
+
+            with (
+                patch("flows.financeiro_medicao.bundle.MAX_WORKBOOK_BYTES", 5, create=True),
+                patch("flows.financeiro_medicao.bundle._CHUNK_SIZE", 3),
+                patch("flows.financeiro_medicao.bundle.Path.open", new=count_workbook_writes),
+            ):
+                with self.assertRaises(WorkbookInvalid):
+                    self.build(root, source)
+
+            self.assertEqual(written, 3)
+            self.assertEqual(list((root / "inbox").iterdir()), [])
+            self.assertEqual(list((root / "runtime").iterdir()), [])
+
+    def test_directory_fsync_opens_fsyncs_and_closes_descriptor_on_posix(self):
+        directory = Path("directory-to-sync")
+        with (
+            patch("flows.financeiro_medicao.bundle.os.name", "posix"),
+            patch("flows.financeiro_medicao.bundle.os.O_DIRECTORY", 0x10000, create=True),
+            patch("flows.financeiro_medicao.bundle.os.open", return_value=71) as open_directory,
+            patch("flows.financeiro_medicao.bundle.os.fsync") as fsync,
+            patch("flows.financeiro_medicao.bundle.os.close") as close,
+        ):
+            from flows.financeiro_medicao.bundle import _fsync_directory
+
+            _fsync_directory(directory)
+
+        flags = open_directory.call_args.args[1]
+        self.assertEqual(open_directory.call_args.args[0], directory)
+        self.assertEqual(flags & 0x10000, 0x10000)
+        self.assertEqual(fsync.call_args.args, (71,))
+        self.assertEqual(close.call_args.args, (71,))
+
+    def test_directory_sync_order_brackets_atomic_replace(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "financeiro_medicao"
+            events = []
+
+            def record_sync(path):
+                events.append(("sync", Path(path).name))
+
+            def record_replace(source, destination):
+                events.append(("replace", Path(source).name, Path(destination).name))
+
+            with (
+                patch("flows.financeiro_medicao.bundle._fsync_directory", side_effect=record_sync),
+                patch("flows.financeiro_medicao.bundle.os.replace", side_effect=record_replace),
+            ):
+                self.build(root, self.make_workbook(directory))
+
+        self.assertEqual([event[0] for event in events], ["sync", "sync", "replace", "sync", "sync"])
+        self.assertEqual(
+            [events[0][1], events[1][1], events[3][1], events[4][1]],
+            [events[2][1], "runtime", "inbox", "runtime"],
+        )
+
+    def test_post_replace_directory_sync_failure_keeps_published_bundle(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "financeiro_medicao"
+            sync_calls = []
+
+            def fail_inbox_sync(path):
+                name = Path(path).name
+                sync_calls.append(name)
+                if name == "inbox":
+                    raise OSError("inbox directory fsync failed")
+
+            with patch("flows.financeiro_medicao.bundle._fsync_directory", side_effect=fail_inbox_sync):
+                with self.assertRaisesRegex(OSError, "inbox directory fsync failed"):
+                    self.build(root, self.make_workbook(directory))
+
+            self.assertEqual(sync_calls[-1], "inbox")
+            packages = list((root / "inbox").iterdir())
+            self.assertEqual(len(packages), 1)
+            self.assertTrue((packages[0] / "manifest.json").is_file())
+            self.assertEqual(list((root / "runtime").iterdir()), [])
 
     def test_workbook_copy_write_failure_cleans_temp_and_preserves_outside_file(self):
         with TemporaryDirectory() as directory:

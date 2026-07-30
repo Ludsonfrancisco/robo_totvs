@@ -7,7 +7,7 @@ from shutil import rmtree
 from uuid import uuid4
 
 from .cycles import CycleWindow
-from .workbook import validate_workbook
+from .workbook import MAX_WORKBOOK_BYTES, SHEET_NAME, WorkbookInvalid, validate_workbook
 
 
 _CHUNK_SIZE = 1024 * 1024
@@ -26,7 +26,7 @@ def _validate_inputs(runtime_root, scheduled_for, started_at, finished_at, image
         raise ValueError("Datas de execução devem incluir fuso horário.")
     if not scheduled_for <= started_at <= finished_at:
         raise ValueError("Datas de execução estão fora de ordem.")
-    return root
+    return root, image_revision.strip()
 
 
 def _copy_with_digest(source, destination):
@@ -34,6 +34,8 @@ def _copy_with_digest(source, destination):
     size = 0
     with Path(source).open("rb") as source_stream, destination.open("wb") as destination_stream:
         while chunk := source_stream.read(_CHUNK_SIZE):
+            if size + len(chunk) > MAX_WORKBOOK_BYTES:
+                raise WorkbookInvalid("Arquivo de medição inválido.")
             destination_stream.write(chunk)
             digest.update(chunk)
             size += len(chunk)
@@ -48,6 +50,18 @@ def _write_manifest(path, manifest):
         stream.write("\n")
         stream.flush()
         os.fsync(stream.fileno())
+
+
+def _fsync_directory(path):
+    """Persist directory entries on POSIX; Windows' os module does not support it."""
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _remove_temp(temp_dir, runtime_dir):
@@ -65,7 +79,9 @@ def build_bundle(*, runtime_root: Path, source: Path, window: CycleWindow,
                  scheduled_for: datetime, started_at: datetime, finished_at: datetime,
                  image_revision: str) -> Path:
     """Validate a copied workbook and atomically publish its immutable inbox bundle."""
-    root = _validate_inputs(runtime_root, scheduled_for, started_at, finished_at, image_revision)
+    root, image_revision = _validate_inputs(
+        runtime_root, scheduled_for, started_at, finished_at, image_revision
+    )
     runtime_dir = root / "runtime"
     inbox_dir = root / "inbox"
     runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -102,11 +118,15 @@ def build_bundle(*, runtime_root: Path, source: Path, window: CycleWindow,
             "workbook_size": workbook_size,
             "workbook_sha256": workbook_sha256,
             "row_count": workbook.row_count,
-            "sheet_name": "Base Medição de Pagamento",
+            "sheet_name": SHEET_NAME,
             "headers": list(workbook.headers),
         }
         _write_manifest(temp_dir / _MANIFEST_NAME, manifest)
+        _fsync_directory(temp_dir)
+        _fsync_directory(runtime_dir)
         os.replace(temp_dir, published_dir)
+        _fsync_directory(inbox_dir)
+        _fsync_directory(runtime_dir)
         return published_dir
     except BaseException:
         _remove_temp(temp_dir, runtime_dir)
