@@ -1,3 +1,4 @@
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -38,6 +39,34 @@ class FinanceiroMedicaoSettingsTests(unittest.TestCase):
 
         self.assertEqual(settings.username, "dashboard-user")
         self.assertEqual(settings.password, "dashboard-password")
+
+    def test_password_values_preserve_spaces_while_file_newlines_are_removed(self):
+        with TemporaryDirectory() as temp_dir:
+            password_file = Path(temp_dir) / "password.txt"
+            password_file.write_text(" password from file \r\n", encoding="utf-8")
+
+            file_settings = Settings.from_mapping(
+                {
+                    "FINANCEIRO_MEDICAO_LOGA_URL": "https://example.invalid",
+                    "LOGA_DASHBOARD_PASSWORD_FILE": str(password_file),
+                }
+            )
+            inline_settings = Settings.from_mapping(
+                {
+                    "FINANCEIRO_MEDICAO_LOGA_URL": "https://example.invalid",
+                    "LOGA_DASHBOARD_PASSWORD": " password inline ",
+                }
+            )
+            fallback_settings = Settings.from_mapping(
+                {
+                    "FINANCEIRO_MEDICAO_LOGA_URL": "https://example.invalid",
+                    "MULTIPLICA_LOGA_PASSWORD": " password fallback ",
+                }
+            )
+
+        self.assertEqual(file_settings.password, " password from file ")
+        self.assertEqual(inline_settings.password, " password inline ")
+        self.assertEqual(fallback_settings.password, " password fallback ")
 
     def test_dashboard_credentials_take_precedence_over_existing_multiplica_values(self):
         settings = Settings.from_mapping(
@@ -124,6 +153,76 @@ class FinanceiroMedicaoSettingsTests(unittest.TestCase):
                         }
                     )
 
+    def test_rejects_non_integer_schedule_and_lock_values_with_context(self):
+        invalid_values = (
+            ("FINANCEIRO_MEDICAO_SCHEDULE_HOUR", "not-an-integer"),
+            ("FINANCEIRO_MEDICAO_SCHEDULE_MINUTE", "not-an-integer"),
+            ("FINANCEIRO_MEDICAO_LOCK_WAIT_SECONDS", "not-an-integer"),
+        )
+        for key, value in invalid_values:
+            with self.subTest(key=key):
+                with self.assertRaisesRegex(ValueError, key):
+                    Settings.from_mapping(
+                        {
+                            "FINANCEIRO_MEDICAO_LOGA_URL": "https://example.invalid",
+                            key: value,
+                        }
+                    )
+
+    def test_accepts_explicit_boolean_values(self):
+        enabled_values = ("true", "1", "yes", "TRUE")
+        disabled_values = ("false", "0", "no", "FALSE")
+
+        for value in enabled_values:
+            with self.subTest(value=value):
+                settings = Settings.from_mapping(
+                    {
+                        "FINANCEIRO_MEDICAO_LOGA_URL": "https://example.invalid",
+                        "FINANCEIRO_MEDICAO_SCHEDULE_ENABLED": value,
+                    }
+                )
+                self.assertTrue(settings.schedule_enabled)
+
+        for value in disabled_values:
+            with self.subTest(value=value):
+                settings = Settings.from_mapping(
+                    {
+                        "FINANCEIRO_MEDICAO_LOGA_URL": "https://example.invalid",
+                        "FINANCEIRO_MEDICAO_SCHEDULE_ENABLED": value,
+                    }
+                )
+                self.assertFalse(settings.schedule_enabled)
+
+    def test_rejects_unknown_schedule_boolean_with_context(self):
+        with self.assertRaisesRegex(ValueError, "FINANCEIRO_MEDICAO_SCHEDULE_ENABLED"):
+            Settings.from_mapping(
+                {
+                    "FINANCEIRO_MEDICAO_LOGA_URL": "https://example.invalid",
+                    "FINANCEIRO_MEDICAO_SCHEDULE_ENABLED": "unknown",
+                }
+            )
+
+    def test_normalizes_and_validates_timezone(self):
+        settings = Settings.from_mapping(
+            {
+                "FINANCEIRO_MEDICAO_LOGA_URL": "https://example.invalid",
+                "FINANCEIRO_MEDICAO_TIMEZONE": "  America/Sao_Paulo  ",
+            }
+        )
+
+        self.assertEqual(settings.timezone, "America/Sao_Paulo")
+
+    def test_rejects_empty_or_unknown_timezone_with_context(self):
+        for timezone in ("   ", "Unknown/Timezone"):
+            with self.subTest(timezone=timezone):
+                with self.assertRaisesRegex(ValueError, "FINANCEIRO_MEDICAO_TIMEZONE"):
+                    Settings.from_mapping(
+                        {
+                            "FINANCEIRO_MEDICAO_LOGA_URL": "https://example.invalid",
+                            "FINANCEIRO_MEDICAO_TIMEZONE": timezone,
+                        }
+                    )
+
     def test_storage_state_path_is_under_runtime_directory(self):
         settings = Settings.from_mapping(
             {"FINANCEIRO_MEDICAO_LOGA_URL": "https://example.invalid"}
@@ -145,3 +244,11 @@ class FinanceiroMedicaoSettingsTests(unittest.TestCase):
             )
 
             self.assertFalse(runtime_root.exists())
+
+    def test_settings_are_frozen(self):
+        settings = Settings.from_mapping(
+            {"FINANCEIRO_MEDICAO_LOGA_URL": "https://example.invalid"}
+        )
+
+        with self.assertRaises(FrozenInstanceError):
+            settings.schedule_enabled = True
