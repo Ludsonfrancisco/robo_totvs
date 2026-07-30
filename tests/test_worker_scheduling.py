@@ -1,5 +1,6 @@
 from datetime import datetime
 from contextlib import contextmanager
+import builtins
 import json
 from pathlib import Path
 import tempfile
@@ -485,6 +486,12 @@ class WorkerSchedulingTests(unittest.TestCase):
             log_file.write_text("previous log", encoding="utf-8")
             done_file.write_text("previous done", encoding="utf-8")
             ready_file.write_text("previous ready", encoding="utf-8")
+            imported = []
+            original_import = builtins.__import__
+
+            def recording_import(name, *args, **kwargs):
+                imported.append(name)
+                return original_import(name, *args, **kwargs)
 
             with patch.object(
                 worker, "LOG_FILE", log_file
@@ -496,7 +503,10 @@ class WorkerSchedulingTests(unittest.TestCase):
                 worker,
                 "file_lock",
                 side_effect=LockUnavailable("LOCKED"),
-            ), patch("main.main"):
+            ), patch(
+                "builtins.__import__",
+                side_effect=recording_import,
+            ):
                 with self.assertRaises(LockUnavailable):
                     worker._run_once("full")
 
@@ -511,6 +521,75 @@ class WorkerSchedulingTests(unittest.TestCase):
             self.assertEqual(
                 ready_file.read_text(encoding="utf-8"),
                 "previous ready",
+            )
+            self.assertNotIn("main", imported)
+
+    def test_import_failure_cleans_old_artifacts_after_acquiring_lock(self):
+        events = []
+        original_import = builtins.__import__
+
+        @contextmanager
+        def recording_lock(_path, *, wait_seconds):
+            events.append(("lock-enter", wait_seconds))
+            try:
+                yield
+            finally:
+                events.append(("lock-exit", wait_seconds))
+
+        def failing_import(name, *args, **kwargs):
+            if name == "main":
+                events.append(("import",))
+                raise ImportError("protheus entrypoint unavailable")
+            return original_import(name, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            log_file = root / "run.log"
+            done_file = root / "run.done"
+            ready_file = root / "signal.ready"
+            log_file.write_text("previous log", encoding="utf-8")
+            done_file.write_text("previous done", encoding="utf-8")
+            ready_file.write_text("previous ready", encoding="utf-8")
+
+            with patch.object(
+                worker, "LOG_FILE", log_file
+            ), patch.object(
+                worker, "DONE_FILE", done_file
+            ), patch.object(
+                worker, "READY_FILE", ready_file
+            ), patch.object(
+                worker, "file_lock", side_effect=recording_lock
+            ), patch(
+                "builtins.__import__",
+                side_effect=failing_import,
+            ), patch.object(
+                worker,
+                "_read_checkpoint_summary",
+                return_value=(10, 10, []),
+            ) as checkpoint_summary:
+                worker._run_once("full")
+
+            payload = json.loads(
+                done_file.read_text(encoding="utf-8")
+            )
+            self.assertFalse(payload["success"])
+            self.assertEqual(payload["tecnicos_total"], 0)
+            self.assertEqual(payload["tecnicos_ok"], 0)
+            self.assertFalse(ready_file.exists())
+            checkpoint_summary.assert_not_called()
+            self.assertNotIn(
+                "previous log",
+                log_file.read_text(encoding="utf-8"),
+            )
+            self.assertEqual(
+                events[:2],
+                [
+                    (
+                        "lock-enter",
+                        worker.CHROMIUM_LOCK_WAIT_SECONDS,
+                    ),
+                    ("import",),
+                ],
             )
 
     def test_acquired_lock_cleans_artifacts_before_robot_execution(self):

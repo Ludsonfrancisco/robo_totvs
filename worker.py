@@ -486,8 +486,10 @@ def _touch_signal_ready() -> None:
         print(f"[worker] erro ao criar signal.ready: {exc}", file=sys.stderr)
 
 
-def _executar_robo(mode: str) -> tuple[bool, str, int | None]:
-    """Adiciona sink loguru, dispara main.main(argv conforme mode), retorna resultado."""
+def _executar_robo(
+    mode: str,
+) -> tuple[bool, str, int | None, bool]:
+    """Dispara main.main e informa se o entrypoint chegou a ser chamado."""
     started_at = _now_iso()
     argv: list[str] = []
     if mode == "retry-falhos":
@@ -504,10 +506,9 @@ def _executar_robo(mode: str) -> tuple[bool, str, int | None]:
     exit_code: int | None = None
     lock_error = None
     sink_id = None
+    entrypoint_called = False
 
     try:
-        from main import main as robo_main
-
         with file_lock(
             GLOBAL_CHROMIUM_LOCK,
             wait_seconds=CHROMIUM_LOCK_WAIT_SECONDS,
@@ -529,6 +530,9 @@ def _executar_robo(mode: str) -> tuple[bool, str, int | None]:
             logger.bind(etapa="worker").info(
                 f"== Início (mode={mode}, started_at={started_at}) =="
             )
+            from main import main as robo_main
+
+            entrypoint_called = True
             exit_code = robo_main(argv)
         success = exit_code == 0
         if exit_code == 0:
@@ -578,13 +582,16 @@ def _executar_robo(mode: str) -> tuple[bool, str, int | None]:
         logger.remove(sink_id)
     except ValueError:
         pass
-    return success, message, exit_code
+    return success, message, exit_code, entrypoint_called
 
 
 def _run_once(mode: str = "scheduled") -> None:
     started_at = _now_iso()
-    success, message, exit_code = _executar_robo(mode)
-    total, ok, falhas = _read_checkpoint_summary()
+    success, message, exit_code, entrypoint_called = _executar_robo(mode)
+    if entrypoint_called:
+        total, ok, falhas = _read_checkpoint_summary()
+    else:
+        total, ok, falhas = 0, 0, []
 
     _write_done(success, message, started_at, exit_code, mode, total, ok, falhas)
 
