@@ -55,6 +55,7 @@ import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from loguru import logger
 
@@ -83,6 +84,21 @@ MULTIPLICA_SCHEDULE_HOUR = int(
 )
 MULTIPLICA_SCHEDULE_MINUTE = int(
     os.environ.get("MULTIPLICA_SCHEDULE_MINUTE", "50")
+)
+FINANCEIRO_MEDICAO_TIMEZONE = os.environ.get(
+    "FINANCEIRO_MEDICAO_TIMEZONE",
+    "America/Sao_Paulo",
+)
+LOCAL_TIMEZONE = ZoneInfo(FINANCEIRO_MEDICAO_TIMEZONE)
+FINANCEIRO_MEDICAO_SCHEDULE_ENABLED = os.environ.get(
+    "FINANCEIRO_MEDICAO_SCHEDULE_ENABLED",
+    "false",
+).lower() in ("1", "true", "yes")
+FINANCEIRO_MEDICAO_SCHEDULE_HOUR = int(
+    os.environ.get("FINANCEIRO_MEDICAO_SCHEDULE_HOUR", "0")
+)
+FINANCEIRO_MEDICAO_SCHEDULE_MINUTE = int(
+    os.environ.get("FINANCEIRO_MEDICAO_SCHEDULE_MINUTE", "1")
 )
 
 # RouterBox Backlog hourly scheduler
@@ -117,8 +133,16 @@ def _ensure_dirs() -> None:
     ROUTERBOX_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _local_now(now: datetime | None = None) -> datetime:
+    if now is None:
+        return datetime.now(LOCAL_TIMEZONE)
+    if now.tzinfo is None:
+        return now
+    return now.astimezone(LOCAL_TIMEZONE)
+
+
 def _next_run_at(now: datetime | None = None) -> datetime:
-    now = now or datetime.now()
+    now = _local_now(now)
     candidate = now.replace(hour=SCHEDULE_HOUR, minute=SCHEDULE_MINUTE, second=0, microsecond=0)
     if candidate <= now:
         candidate += timedelta(days=1)
@@ -126,10 +150,25 @@ def _next_run_at(now: datetime | None = None) -> datetime:
 
 
 def _next_multiplica_run_at(now: datetime | None = None) -> datetime:
-    now = now or datetime.now()
+    now = _local_now(now)
     candidate = now.replace(
         hour=MULTIPLICA_SCHEDULE_HOUR,
         minute=MULTIPLICA_SCHEDULE_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+    if candidate <= now:
+        candidate += timedelta(days=1)
+    return candidate
+
+
+def _next_financeiro_medicao_run_at(
+    now: datetime | None = None,
+) -> datetime:
+    now = _local_now(now)
+    candidate = now.replace(
+        hour=FINANCEIRO_MEDICAO_SCHEDULE_HOUR,
+        minute=FINANCEIRO_MEDICAO_SCHEDULE_MINUTE,
         second=0,
         microsecond=0,
     )
@@ -239,6 +278,34 @@ def _run_scheduled_multiplica() -> bool:
         )
         return False
     return True
+
+
+def _run_scheduled_financeiro_medicao() -> bool:
+    from flows.financeiro_medicao.runner import run_once
+
+    try:
+        payload = run_once()
+    except Exception:
+        logger.error(
+            "[financeiro_medicao] Falha agendada; "
+            "error_code=UNEXPECTED_ERROR."
+        )
+        return False
+
+    if payload.get("success") is True:
+        logger.info("[financeiro_medicao] Coleta agendada concluída.")
+        return True
+
+    error_code = (
+        "LOCKED"
+        if payload.get("error_code") == "LOCKED"
+        else "RUN_FAILED"
+    )
+    logger.warning(
+        "[financeiro_medicao] Coleta agendada não concluída; "
+        f"error_code={error_code}."
+    )
+    return False
 
 
 def _protheus_signal_mode(path: Path) -> str:
@@ -617,7 +684,10 @@ def _sleep_until_or_signal(target: datetime) -> str | None:
     while True:
         if SIGNAL_FILE.exists():
             return "signal"
-        remaining = (target - datetime.now()).total_seconds()
+        now = _local_now()
+        if target.tzinfo is None:
+            now = now.replace(tzinfo=None)
+        remaining = (target - now).total_seconds()
         if remaining <= 0:
             return None
         chunk = min(remaining, float(POLL_INTERVAL_S))
@@ -740,7 +810,7 @@ def _run_routerbox_backlog() -> None:
 
 def _next_routerbox_run_at(now: datetime | None = None) -> datetime:
     """Retorna o próximo horário de execução do RouterBox (dentro da janela configurada)."""
-    now = now or datetime.now()
+    now = _local_now(now)
     interval = ROUTERBOX_INTERVAL_MIN
     minutes_today = now.hour * 60 + now.minute
 
@@ -767,7 +837,7 @@ def _next_routerbox_run_at(now: datetime | None = None) -> datetime:
 
 
 def _scheduled_events(now: datetime | None = None) -> list[tuple[str, datetime]]:
-    now = now or datetime.now()
+    now = _local_now(now)
     events: list[tuple[str, datetime]] = []
     if PROTHEUS_ENABLED:
         events.append(("protheus", _next_run_at(now)))
@@ -775,6 +845,13 @@ def _scheduled_events(now: datetime | None = None) -> list[tuple[str, datetime]]
         events.append(("routerbox", _next_routerbox_run_at(now)))
     if MULTIPLICA_SCHEDULE_ENABLED:
         events.append(("multiplica", _next_multiplica_run_at(now)))
+    if FINANCEIRO_MEDICAO_SCHEDULE_ENABLED:
+        events.append(
+            (
+                "financeiro_medicao",
+                _next_financeiro_medicao_run_at(now),
+            )
+        )
     return sorted(events, key=lambda event: event[1])
 
 
@@ -798,6 +875,13 @@ def loop_forever() -> None:
         f"Multiplica: scheduled={MULTIPLICA_SCHEDULE_ENABLED} "
         f"time={MULTIPLICA_SCHEDULE_HOUR:02d}:{MULTIPLICA_SCHEDULE_MINUTE:02d} "
         f"signal={MULTIPLICA_SIGNAL_FILE}"
+    )
+    logger.info(
+        "Financeiro medição: "
+        f"scheduled={FINANCEIRO_MEDICAO_SCHEDULE_ENABLED} "
+        f"time={FINANCEIRO_MEDICAO_SCHEDULE_HOUR:02d}:"
+        f"{FINANCEIRO_MEDICAO_SCHEDULE_MINUTE:02d} "
+        f"timezone={FINANCEIRO_MEDICAO_TIMEZONE}"
     )
 
     if PROTHEUS_ENABLED and RUN_ON_START:
@@ -833,7 +917,7 @@ def loop_forever() -> None:
             next_name, next_time = events[0]
 
             # Dormir até o próximo evento, mas checar signal a cada POLL_INTERVAL_S
-            remaining = (next_time - datetime.now()).total_seconds()
+            remaining = (next_time - _local_now()).total_seconds()
             logger.info(
                 f"Próximo evento: {next_name} em {int(remaining)}s "
                 f"({next_time.strftime('%H:%M:%S')})"
@@ -852,14 +936,16 @@ def loop_forever() -> None:
 
                 # Checar se RouterBox deve disparar antes do Protheus
                 if ROUTERBOX_ENABLED:
-                    rb_remaining = (_next_routerbox_run_at() - datetime.now()).total_seconds()
+                    rb_remaining = (
+                        _next_routerbox_run_at() - _local_now()
+                    ).total_seconds()
                     if rb_remaining <= 0:
                         _run_routerbox_backlog()
                         break
 
                 chunk = min(remaining, float(POLL_INTERVAL_S))
                 time.sleep(chunk)
-                remaining = (next_time - datetime.now()).total_seconds()
+                remaining = (next_time - _local_now()).total_seconds()
 
             # Executar o evento que venceu
             if remaining <= 0:
@@ -870,6 +956,8 @@ def loop_forever() -> None:
                     _run_routerbox_backlog()
                 elif next_name == "multiplica":
                     _run_scheduled_multiplica()
+                elif next_name == "financeiro_medicao":
+                    _run_scheduled_financeiro_medicao()
 
         except KeyboardInterrupt:
             logger.info("KeyboardInterrupt recebido. Encerrando.")

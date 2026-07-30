@@ -8,7 +8,9 @@ EasyPanel é `dmais_automacoes` e o serviço esperado é
 O Protheus/TOTVS foi descontinuado e permanece desabilitado por padrão. O
 RouterBox existente deve continuar sem alteração de código, horário ou contrato.
 O Multiplica usa sessão própria e execução inicialmente manual; a agenda futura
-das 23h50 permanece desabilitada.
+das 23h50 permanece desabilitada. A medição financeira também permanece
+desabilitada por padrão e, quando habilitada, executa diariamente às 00:01 no
+fuso `America/Sao_Paulo`.
 
 O container roda no EasyPanel ao lado do Portal D+
 ([dmais_portal](https://github.com/Ludsonfrancisco/dmais_portal)) e troca
@@ -24,6 +26,7 @@ Spec completa: ver [`PRD.md`](./PRD.md). Roteiro de desenvolvimento: ver [`TASKS
 | **Worker scheduler** (produção) | `python worker.py` (em loop) | dispara automaticamente em `ROBOT_SCHEDULE_HOUR:MINUTE` (default 06:00) |
 | **Worker signal-driven** (produção) | Portal D+ cria `run.signal` no volume | worker detecta em ≤5s e roda `main.main(["--retry-falhos"])` |
 | **Multiplica manual** | criar `multiplica/multiplica.signal` no volume | coleta o pacote Loga sem habilitar a agenda |
+| **Medição financeira** | agenda opcional do worker | coleta diária às 00:01 no fuso configurado |
 
 O worker coordena automações independentes. `PROTHEUS_ENABLED=false` impede a
 rotina obsoleta; RouterBox mantém suas flags atuais e o sinal manual do
@@ -105,6 +108,10 @@ O `worker.py` é o `CMD` default do Dockerfile. Configurável via envs:
 | `MULTIPLICA_TIMEZONE` | `America/Sao_Paulo` | Fuso do agendamento futuro |
 | `MULTIPLICA_RUNTIME_ROOT` | `/app/data_pipeline/multiplica` | Sessão, inbox e runtime próprios |
 | `MULTIPLICA_LOGA_URL` | sem default | URL HTTPS da Loga, sem credenciais |
+| `FINANCEIRO_MEDICAO_SCHEDULE_ENABLED` | `false` | Habilita explicitamente a coleta diária de medição |
+| `FINANCEIRO_MEDICAO_SCHEDULE_HOUR` | `0` | Hora local da coleta de medição |
+| `FINANCEIRO_MEDICAO_SCHEDULE_MINUTE` | `1` | Minuto local da coleta de medição |
+| `FINANCEIRO_MEDICAO_TIMEZONE` | `America/Sao_Paulo` | Fuso usado pelo scheduler da medição |
 
 ### Contrato de arquivos no volume compartilhado
 
@@ -213,6 +220,10 @@ MULTIPLICA_SCHEDULE_ENABLED=false
 MULTIPLICA_SCHEDULE_HOUR=23
 MULTIPLICA_SCHEDULE_MINUTE=50
 MULTIPLICA_TIMEZONE=America/Sao_Paulo
+FINANCEIRO_MEDICAO_SCHEDULE_ENABLED=false
+FINANCEIRO_MEDICAO_SCHEDULE_HOUR=0
+FINANCEIRO_MEDICAO_SCHEDULE_MINUTE=1
+FINANCEIRO_MEDICAO_TIMEZONE=America/Sao_Paulo
 ```
 
 Durante o corte, o RouterBox automático deve existir em apenas um serviço.
