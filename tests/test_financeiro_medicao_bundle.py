@@ -1,6 +1,7 @@
 from datetime import date, datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -205,6 +206,8 @@ class FinanceiroMedicaoBundleTests(unittest.TestCase):
     def test_directory_sync_order_brackets_atomic_replace(self):
         with TemporaryDirectory() as directory:
             root = Path(directory) / "financeiro_medicao"
+            (root / "runtime").mkdir(parents=True)
+            (root / "inbox").mkdir()
             events = []
 
             def record_sync(path):
@@ -225,9 +228,51 @@ class FinanceiroMedicaoBundleTests(unittest.TestCase):
             [events[2][1], "runtime", "inbox", "runtime"],
         )
 
+    def test_initial_runtime_structure_is_synced_before_publication(self):
+        with TemporaryDirectory() as directory:
+            parent = Path(directory) / "mounted-parent"
+            parent.mkdir()
+            root = parent / "financeiro_medicao"
+            events = []
+            original_replace = os.replace
+
+            def record_sync(path):
+                events.append(("sync", Path(path).name))
+
+            def record_replace(source, destination):
+                events.append(("replace", Path(source).name, Path(destination).name))
+                original_replace(source, destination)
+
+            with (
+                patch("flows.financeiro_medicao.bundle._fsync_directory", side_effect=record_sync),
+                patch("flows.financeiro_medicao.bundle.os.replace", side_effect=record_replace),
+            ):
+                self.build(root, self.make_workbook(directory))
+
+        self.assertGreaterEqual(len(events), 11)
+        self.assertEqual(events[:6], [
+            ("sync", "financeiro_medicao"), ("sync", "mounted-parent"),
+            ("sync", "runtime"), ("sync", "financeiro_medicao"),
+            ("sync", "inbox"), ("sync", "financeiro_medicao"),
+        ])
+        self.assertEqual(events[6][0], "sync")
+        self.assertEqual(events[7], ("sync", "runtime"))
+        self.assertEqual(events[8][0], "replace")
+
+    def test_rejects_missing_runtime_parent_without_creating_it(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "missing-parent" / "financeiro_medicao"
+
+            with self.assertRaises(ValueError):
+                self.build(root, self.make_workbook(directory))
+
+            self.assertFalse(root.parent.exists())
+
     def test_post_replace_directory_sync_failure_keeps_published_bundle(self):
         with TemporaryDirectory() as directory:
             root = Path(directory) / "financeiro_medicao"
+            (root / "runtime").mkdir(parents=True)
+            (root / "inbox").mkdir()
             sync_calls = []
 
             def fail_inbox_sync(path):

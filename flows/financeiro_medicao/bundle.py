@@ -19,6 +19,8 @@ def _validate_inputs(runtime_root, scheduled_for, started_at, finished_at, image
     root = Path(runtime_root)
     if root.name != "financeiro_medicao":
         raise ValueError("Diretório de execução inválido.")
+    if not root.parent.is_dir():
+        raise ValueError("Diretório pai de execução inválido.")
     if not isinstance(image_revision, str) or not image_revision.strip():
         raise ValueError("Revisão da imagem inválida.")
     timestamps = (scheduled_for, started_at, finished_at)
@@ -64,6 +66,15 @@ def _fsync_directory(path):
         os.close(descriptor)
 
 
+def _mkdir_durable(path):
+    try:
+        path.mkdir()
+    except FileExistsError:
+        return
+    _fsync_directory(path)
+    _fsync_directory(path.parent)
+
+
 def _remove_temp(temp_dir, runtime_dir):
     try:
         resolved_temp = temp_dir.resolve()
@@ -84,8 +95,9 @@ def build_bundle(*, runtime_root: Path, source: Path, window: CycleWindow,
     )
     runtime_dir = root / "runtime"
     inbox_dir = root / "inbox"
-    runtime_dir.mkdir(parents=True, exist_ok=True)
-    inbox_dir.mkdir(parents=True, exist_ok=True)
+    _mkdir_durable(root)
+    _mkdir_durable(runtime_dir)
+    _mkdir_durable(inbox_dir)
 
     run_id = uuid4().hex
     temp_dir = runtime_dir / f"{run_id}.tmp"
