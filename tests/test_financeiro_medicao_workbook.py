@@ -2,6 +2,7 @@ from datetime import date, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from openpyxl import Workbook
 
@@ -102,6 +103,18 @@ class FinanceiroMedicaoWorkbookTests(unittest.TestCase):
                 with self.subTest(path=path.name):
                     with self.assertRaises(WorkbookInvalid):
                         validate_workbook(path, date(2026, 7, 11), date(2026, 7, 31))
+
+    def test_rejects_xlsx_with_malformed_xml(self):
+        with TemporaryDirectory() as directory:
+            valid_path = self.make_workbook(directory, rows=(CANONICAL_ROW,))
+            malformed_path = Path(directory) / "malformed.xlsx"
+            with ZipFile(valid_path) as source, ZipFile(malformed_path, "w", ZIP_DEFLATED) as target:
+                for entry in source.infolist():
+                    content = b"<workbook>" if entry.filename == "xl/workbook.xml" else source.read(entry.filename)
+                    target.writestr(entry, content)
+
+            with self.assertRaises(WorkbookInvalid):
+                validate_workbook(malformed_path, date(2026, 7, 11), date(2026, 7, 31))
 
     def test_rejects_inverted_query_period(self):
         with TemporaryDirectory() as directory:
