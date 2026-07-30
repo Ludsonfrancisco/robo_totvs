@@ -3,11 +3,14 @@ from datetime import date
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
+from flows.common.locks import file_lock
 from flows.multiplica.config import Settings
 from flows.multiplica.loga import CollectionError
+from flows.multiplica import runner
 from flows.multiplica.runner import AlreadyRunning, run_once
 
 
@@ -32,14 +35,81 @@ class RunnerTests(unittest.TestCase):
 
     def test_lock_prevents_concurrent_run(self):
         lock = self.settings.runtime_root / "runtime" / "run_multiplica.lock"
-        lock.write_text("ocupado", encoding="utf-8")
-        with self.assertRaises(AlreadyRunning):
+        with file_lock(lock, wait_seconds=0):
+            with self.assertRaises(AlreadyRunning):
+                run_once(
+                    settings=self.settings,
+                    day=date(2026, 7, 23),
+                    page_factory=self.page_factory,
+                    collector=lambda *_: None,
+                )
+
+    def test_global_chromium_lock_prevents_browser_entry(self):
+        global_lock = (
+            self.settings.runtime_root.parent
+            / "runtime"
+            / "chromium.lock"
+        )
+        with patch.object(
+            runner,
+            "GLOBAL_CHROMIUM_LOCK_WAIT_SECONDS",
+            0,
+        ):
+            with file_lock(global_lock, wait_seconds=0):
+                with self.assertRaises(AlreadyRunning):
+                    run_once(
+                        settings=self.settings,
+                        day=date(2026, 7, 23),
+                        page_factory=self.page_factory,
+                        collector=lambda *_: None,
+                    )
+
+    def test_flow_lock_is_acquired_before_global_chromium_lock(self):
+        events = []
+
+        @contextmanager
+        def recording_lock(path, *, wait_seconds):
+            events.append(("enter", Path(path), wait_seconds))
+            try:
+                yield
+            finally:
+                events.append(("exit", Path(path), wait_seconds))
+
+        with patch.object(
+            runner,
+            "file_lock",
+            side_effect=recording_lock,
+        ), patch.object(
+            runner,
+            "GLOBAL_CHROMIUM_LOCK_WAIT_SECONDS",
+            37,
+        ):
             run_once(
                 settings=self.settings,
                 day=date(2026, 7, 23),
                 page_factory=self.page_factory,
-                collector=lambda *_: None,
+                collector=lambda *_: Path("pacote"),
             )
+
+        flow_lock = (
+            self.settings.runtime_root
+            / "runtime"
+            / "run_multiplica.lock"
+        )
+        global_lock = (
+            self.settings.runtime_root.parent
+            / "runtime"
+            / "chromium.lock"
+        )
+        self.assertEqual(
+            events,
+            [
+                ("enter", flow_lock, 0),
+                ("enter", global_lock, 37),
+                ("exit", global_lock, 37),
+                ("exit", flow_lock, 0),
+            ],
+        )
 
     def test_auth_expired_is_not_retried(self):
         attempts = []
@@ -77,13 +147,14 @@ class RunnerTests(unittest.TestCase):
 
         self.assertTrue(result["success"])
         self.assertEqual(len(attempts), 3)
-        self.assertFalse(
-            (
-                self.settings.runtime_root
-                / "runtime"
-                / "run_multiplica.lock"
-            ).exists()
+        lock = (
+            self.settings.runtime_root
+            / "runtime"
+            / "run_multiplica.lock"
         )
+        self.assertTrue(lock.exists())
+        with file_lock(lock, wait_seconds=0):
+            pass
 
     def test_playwright_timeout_is_retried(self):
         attempts = []

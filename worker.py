@@ -57,7 +57,13 @@ from pathlib import Path
 
 from loguru import logger
 
+from flows.common.locks import file_lock
+
 DATA_PIPELINE_DIR = Path(os.environ.get("DATA_PIPELINE_DIR", "/app/data_pipeline"))
+GLOBAL_CHROMIUM_LOCK = DATA_PIPELINE_DIR / "runtime" / "chromium.lock"
+CHROMIUM_LOCK_WAIT_SECONDS = int(
+    os.environ.get("CHROMIUM_LOCK_WAIT_SECONDS", "1200")
+)
 SCHEDULE_HOUR = int(os.environ.get("ROBOT_SCHEDULE_HOUR", "6"))
 SCHEDULE_MINUTE = int(os.environ.get("ROBOT_SCHEDULE_MINUTE", "0"))
 RUN_ON_START = os.environ.get("ROBOT_RUN_ON_START", "false").lower() in ("1", "true", "yes")
@@ -106,6 +112,7 @@ def _now_iso() -> str:
 
 def _ensure_dirs() -> None:
     DATA_PIPELINE_DIR.mkdir(parents=True, exist_ok=True)
+    (DATA_PIPELINE_DIR / "runtime").mkdir(parents=True, exist_ok=True)
     (DATA_PIPELINE_DIR / "entrada").mkdir(parents=True, exist_ok=True)
     (DATA_PIPELINE_DIR / "processos").mkdir(parents=True, exist_ok=True)
     ROUTERBOX_DIR.mkdir(parents=True, exist_ok=True)
@@ -285,7 +292,11 @@ def _executar_robo(mode: str) -> tuple[bool, str, int | None]:
     try:
         from main import main as robo_main
 
-        exit_code = robo_main(argv)
+        with file_lock(
+            GLOBAL_CHROMIUM_LOCK,
+            wait_seconds=CHROMIUM_LOCK_WAIT_SECONDS,
+        ):
+            exit_code = robo_main(argv)
         success = exit_code == 0
         if exit_code == 0:
             message = "Todos os técnicos processados com sucesso."
@@ -409,7 +420,11 @@ def _run_routerbox_backlog() -> None:
     started_at = _now_iso()
     try:
         from flows.routerbox_backlog import run_routerbox_backlog
-        exit_code = run_routerbox_backlog()
+        with file_lock(
+            GLOBAL_CHROMIUM_LOCK,
+            wait_seconds=CHROMIUM_LOCK_WAIT_SECONDS,
+        ):
+            exit_code = run_routerbox_backlog()
     except SystemExit as exc:
         exit_code = int(exc.code or 0)
     except Exception as exc:

@@ -1,4 +1,5 @@
 from datetime import datetime
+from contextlib import contextmanager
 from pathlib import Path
 import tempfile
 import unittest
@@ -63,3 +64,106 @@ class WorkerSchedulingTests(unittest.TestCase):
 
         self.assertTrue(consumed)
         run_once.assert_called_once_with()
+
+    def test_multiplica_dispatch_is_not_wrapped_in_worker_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            signal_file = Path(tmp) / "multiplica.signal"
+            signal_file.touch()
+            with patch.object(
+                worker, "MULTIPLICA_SIGNAL_FILE", signal_file
+            ), patch.object(
+                multiplica_runner, "run_once"
+            ) as run_once, patch.object(
+                worker, "file_lock"
+            ) as worker_lock:
+                worker._run_multiplica_signal_if_present()
+
+        run_once.assert_called_once_with()
+        worker_lock.assert_not_called()
+
+    def test_protheus_browser_entrypoint_uses_global_lock(self):
+        events = []
+
+        @contextmanager
+        def recording_lock(path, *, wait_seconds):
+            events.append(("lock-enter", Path(path), wait_seconds))
+            try:
+                yield
+            finally:
+                events.append(("lock-exit", Path(path), wait_seconds))
+
+        def robot_main(_argv):
+            events.append(("protheus",))
+            return 0
+
+        with tempfile.TemporaryDirectory() as temporary, patch.object(
+            worker, "LOG_FILE", Path(temporary) / "run.log"
+        ), patch.object(
+            worker, "file_lock", side_effect=recording_lock
+        ), patch(
+            "main.main", side_effect=robot_main
+        ):
+            worker._executar_robo("scheduled")
+
+        self.assertEqual(
+            events,
+            [
+                (
+                    "lock-enter",
+                    worker.GLOBAL_CHROMIUM_LOCK,
+                    worker.CHROMIUM_LOCK_WAIT_SECONDS,
+                ),
+                ("protheus",),
+                (
+                    "lock-exit",
+                    worker.GLOBAL_CHROMIUM_LOCK,
+                    worker.CHROMIUM_LOCK_WAIT_SECONDS,
+                ),
+            ],
+        )
+
+    def test_routerbox_browser_entrypoint_uses_global_lock(self):
+        events = []
+
+        @contextmanager
+        def recording_lock(path, *, wait_seconds):
+            events.append(("lock-enter", Path(path), wait_seconds))
+            try:
+                yield
+            finally:
+                events.append(("lock-exit", Path(path), wait_seconds))
+
+        def routerbox_main():
+            events.append(("routerbox",))
+            return 0
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch.object(
+                worker, "ROUTERBOX_DIR", root
+            ), patch.object(
+                worker, "ROUTERBOX_DONE_FILE", root / "done.json"
+            ), patch.object(
+                worker, "file_lock", side_effect=recording_lock
+            ), patch(
+                "flows.routerbox_backlog.run_routerbox_backlog",
+                side_effect=routerbox_main,
+            ):
+                worker._run_routerbox_backlog()
+
+        self.assertEqual(
+            events,
+            [
+                (
+                    "lock-enter",
+                    worker.GLOBAL_CHROMIUM_LOCK,
+                    worker.CHROMIUM_LOCK_WAIT_SECONDS,
+                ),
+                ("routerbox",),
+                (
+                    "lock-exit",
+                    worker.GLOBAL_CHROMIUM_LOCK,
+                    worker.CHROMIUM_LOCK_WAIT_SECONDS,
+                ),
+            ],
+        )
