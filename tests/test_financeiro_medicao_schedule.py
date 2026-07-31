@@ -1238,6 +1238,7 @@ class FinanceiroMedicaoWorkerIntegrationTests(unittest.TestCase):
                 "FINANCEIRO_MEDICAO_SCHEDULE_MINUTE": "1",
                 "FINANCEIRO_MEDICAO_TIMEZONE": "America/Sao_Paulo",
             },
+            clear=True,
         ), patch.object(
             worker, "FINANCEIRO_MEDICAO_SCHEDULE_ENABLED", True
         ), patch.object(

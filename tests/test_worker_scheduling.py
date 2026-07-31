@@ -200,7 +200,7 @@ class WorkerSchedulingTests(unittest.TestCase):
                 "LOGA_DASHBOARD_USER": "financeiro-user",
                 "LOGA_DASHBOARD_PASSWORD": "financeiro-password",
             }
-            with patch.dict(os.environ, environment), patch.object(
+            with patch.dict(os.environ, environment, clear=True), patch.object(
                 worker,
                 "FINANCEIRO_MEDICAO_SCHEDULE_ENABLED",
                 True,
