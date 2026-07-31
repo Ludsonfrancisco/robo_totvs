@@ -2,6 +2,7 @@ from datetime import datetime
 from contextlib import contextmanager
 import builtins
 import json
+import os
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -11,7 +12,9 @@ from zoneinfo import ZoneInfo
 
 import worker
 from flows.common.locks import LockUnavailable
+from flows.financeiro_medicao.config import Settings as FinanceiroMedicaoSettings
 from flows.financeiro_medicao import runner as financeiro_medicao_runner
+from flows.financeiro_medicao import schedule as financeiro_medicao_schedule
 from flows.multiplica import runner as multiplica_runner
 
 
@@ -71,6 +74,12 @@ class WorkerSchedulingTests(unittest.TestCase):
             worker,
             "FINANCEIRO_MEDICAO_SCHEDULE_ENABLED",
             True,
+        ), patch.object(
+            worker,
+            "_financeiro_schedule_settings",
+            return_value=self._financeiro_settings(
+                "/app/data_pipeline/financeiro_medicao"
+            ),
         ):
             enabled_events = dict(worker._scheduled_events(now))
 
@@ -164,6 +173,59 @@ class WorkerSchedulingTests(unittest.TestCase):
             event_id=event_id,
         )
         self.assertNotIn(worker.GLOBAL_CHROMIUM_LOCK, locked_paths)
+
+    def test_scheduled_financeiro_uses_complete_runtime_settings(self):
+        timezone = ZoneInfo("America/Sao_Paulo")
+        scheduled_for = datetime(
+            2026,
+            7,
+            30,
+            0,
+            1,
+            tzinfo=timezone,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime_root = Path(temporary, "financeiro_medicao")
+            runtime_root.mkdir()
+            environment = {
+                "FINANCEIRO_MEDICAO_LOGA_URL": (
+                    "https://dashboard.loga.net.br/medicao_pagamento"
+                ),
+                "FINANCEIRO_MEDICAO_RUNTIME_ROOT": str(runtime_root),
+                "FINANCEIRO_MEDICAO_SCHEDULE_ENABLED": "true",
+                "FINANCEIRO_MEDICAO_SCHEDULE_HOUR": "0",
+                "FINANCEIRO_MEDICAO_SCHEDULE_MINUTE": "1",
+                "FINANCEIRO_MEDICAO_TIMEZONE": "America/Sao_Paulo",
+                "FINANCEIRO_MEDICAO_LOCK_WAIT_SECONDS": "1200",
+                "LOGA_DASHBOARD_USER": "financeiro-user",
+                "LOGA_DASHBOARD_PASSWORD": "financeiro-password",
+            }
+            with patch.dict(os.environ, environment, clear=True), patch.object(
+                worker,
+                "FINANCEIRO_MEDICAO_SCHEDULE_ENABLED",
+                True,
+            ), patch.object(
+                worker,
+                "FINANCEIRO_MEDICAO_RUNTIME_ROOT",
+                str(runtime_root),
+            ), patch.object(
+                financeiro_medicao_schedule,
+                "request_run",
+            ) as request_run, patch.object(
+                financeiro_medicao_schedule,
+                "run_signal_if_due",
+                return_value=True,
+            ):
+                result = worker._run_scheduled_financeiro_medicao(
+                    scheduled_for=scheduled_for,
+                )
+
+        self.assertTrue(result)
+        settings = request_run.call_args.args[0]
+        self.assertIsInstance(settings, FinanceiroMedicaoSettings)
+        self.assertEqual(settings.username, "financeiro-user")
+        self.assertEqual(settings.password, "financeiro-password")
+        self.assertEqual(settings.lock_wait_seconds, 1200)
 
     def test_financeiro_medicao_locked_result_is_sanitized_and_nonfatal(self):
         timezone = ZoneInfo("America/Sao_Paulo")
