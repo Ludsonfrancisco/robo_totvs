@@ -31,6 +31,192 @@ class WorkerSchedulingTests(unittest.TestCase):
     def test_financeiro_medicao_disabled_by_default(self):
         self.assertFalse(worker.FINANCEIRO_MEDICAO_SCHEDULE_ENABLED)
 
+    def test_financeiro_hoje_and_medicao_coexist_in_scheduler(self):
+        self.assertTrue(
+            hasattr(worker, "FINANCEIRO_HOJE_SCHEDULE_ENABLED"),
+            "a imagem combinada precisa registrar o Financeiro Hoje",
+        )
+        now = datetime(2026, 7, 31, 0, 0)
+        with patch.object(
+            worker,
+            "FINANCEIRO_HOJE_SCHEDULE_ENABLED",
+            True,
+        ), patch.object(
+            worker,
+            "FINANCEIRO_MEDICAO_SCHEDULE_ENABLED",
+            True,
+        ), patch.object(
+            worker,
+            "ROUTERBOX_ENABLED",
+            False,
+        ), patch.object(
+            worker,
+            "MULTIPLICA_SCHEDULE_ENABLED",
+            False,
+        ), patch.object(
+            worker,
+            "PROTHEUS_ENABLED",
+            False,
+        ), patch.object(
+            worker,
+            "_financeiro_schedule_settings",
+            return_value=self._financeiro_settings(
+                "/app/data_pipeline/financeiro_medicao"
+            ),
+        ):
+            events = dict(worker._scheduled_events(now))
+
+        self.assertEqual(
+            events["financeiro_medicao"],
+            datetime(2026, 7, 31, 0, 1),
+        )
+        self.assertEqual(
+            events["financeiro_hoje"],
+            datetime(2026, 7, 31, 0, 30),
+        )
+
+    def test_combined_scheduler_keeps_aware_events_comparable(self):
+        timezone = ZoneInfo("America/Sao_Paulo")
+        now = datetime(2026, 7, 31, 8, 40, tzinfo=timezone)
+        with patch.object(
+            worker,
+            "FINANCEIRO_HOJE_SCHEDULE_ENABLED",
+            True,
+        ), patch.object(
+            worker,
+            "FINANCEIRO_MEDICAO_SCHEDULE_ENABLED",
+            True,
+        ), patch.object(
+            worker,
+            "ROUTERBOX_ENABLED",
+            True,
+        ), patch.object(
+            worker,
+            "MULTIPLICA_SCHEDULE_ENABLED",
+            False,
+        ), patch.object(
+            worker,
+            "PROTHEUS_ENABLED",
+            False,
+        ), patch.object(
+            worker,
+            "_financeiro_schedule_settings",
+            return_value=self._financeiro_settings(
+                "/app/data_pipeline/financeiro_medicao"
+            ),
+        ):
+            events = dict(worker._scheduled_events(now))
+
+        self.assertEqual(
+            set(events),
+            {"routerbox", "financeiro_hoje", "financeiro_medicao"},
+        )
+        self.assertTrue(
+            all(value.utcoffset() is not None for value in events.values())
+        )
+
+    def test_financeiro_hoje_manual_signal_runs_with_scheduler_disabled(self):
+        self.assertTrue(
+            hasattr(worker, "_run_financeiro_hoje_signal_if_allowed"),
+            "o worker combinado precisa consumir o sinal Financeiro Hoje",
+        )
+        scheduled_for = datetime.fromisoformat(
+            "2026-07-31T08:40:00-03:00"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            signal_file = Path(temporary) / "financeiro_hoje.signal"
+            signal_file.write_text(
+                json.dumps(
+                    {"scheduled_for": scheduled_for.isoformat()}
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(
+                worker,
+                "FINANCEIRO_HOJE_SIGNAL_FILE",
+                signal_file,
+            ), patch.object(
+                worker,
+                "FINANCEIRO_HOJE_SCHEDULE_ENABLED",
+                False,
+            ), patch.object(
+                worker,
+                "ROUTERBOX_ENABLED",
+                False,
+            ), patch.object(
+                worker,
+                "_run_financeiro_hoje",
+                return_value={"success": True},
+            ) as run_once:
+                consumed = worker._run_financeiro_hoje_signal_if_allowed()
+
+        self.assertTrue(consumed)
+        self.assertFalse(signal_file.exists())
+        run_once.assert_called_once_with(scheduled_for=scheduled_for)
+
+    def test_loop_polls_financeiro_hoje_signal_while_waiting(self):
+        now = datetime(2026, 7, 31, 8, 40)
+        target = datetime(2026, 7, 31, 8, 50)
+        with patch.object(worker, "_ensure_dirs"), patch.object(
+            worker,
+            "_scheduled_events",
+            return_value=[("financeiro_hoje", target)],
+        ), patch.object(
+            worker,
+            "_local_now",
+            return_value=now,
+        ), patch.object(
+            worker,
+            "_run_multiplica_signal_if_present",
+            return_value=False,
+        ), patch.object(
+            worker,
+            "_run_financeiro_hoje_signal_if_allowed",
+            return_value=False,
+        ) as poll_financeiro, patch.object(
+            worker.time,
+            "sleep",
+            side_effect=KeyboardInterrupt,
+        ):
+            worker.loop_forever()
+
+        self.assertEqual(poll_financeiro.call_count, 2)
+
+    def test_loop_dispatches_financeiro_hoje_event_exactly_once(self):
+        self.assertTrue(
+            hasattr(worker, "_run_scheduled_financeiro_hoje"),
+            "o worker combinado precisa despachar o evento Financeiro Hoje",
+        )
+        target = datetime(2026, 7, 31, 8, 50)
+        with patch.object(worker, "_ensure_dirs"), patch.object(
+            worker,
+            "_scheduled_events",
+            return_value=[("financeiro_hoje", target)],
+        ), patch.object(
+            worker,
+            "_local_now",
+            return_value=target,
+        ), patch.object(
+            worker,
+            "_run_multiplica_signal_if_present",
+            return_value=False,
+        ), patch.object(
+            worker,
+            "_run_financeiro_hoje_signal_if_allowed",
+            return_value=False,
+        ), patch.object(
+            worker,
+            "_run_scheduled_financeiro_hoje",
+            return_value={"success": True},
+        ) as dispatch, patch.object(
+            worker,
+            "_advance_scheduled_event",
+            side_effect=KeyboardInterrupt,
+        ):
+            worker.loop_forever()
+
+        dispatch.assert_called_once_with(target)
+
     def test_next_financeiro_medicao_run_is_0001_after_day_rollover(self):
         now = datetime(2026, 7, 30, 23, 59, 30)
         self.assertEqual(

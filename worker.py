@@ -55,14 +55,19 @@ import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Mapping
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from loguru import logger
 
 from flows.common.locks import LockUnavailable, file_lock
+from flows.financeiro_hoje.config import (
+    resolve_root as resolve_financeiro_hoje_root,
+)
 from flows.financeiro_medicao import schedule as financeiro_schedule
 from flows.financeiro_medicao.config import Settings as FinanceiroMedicaoSettings
+from flows.routerbox_coordination import finance_may_start
 
 DATA_PIPELINE_DIR = Path(os.environ.get("DATA_PIPELINE_DIR", "/app/data_pipeline"))
 GLOBAL_CHROMIUM_LOCK = DATA_PIPELINE_DIR / "runtime" / "chromium.lock"
@@ -87,6 +92,14 @@ MULTIPLICA_SCHEDULE_HOUR = int(
 )
 MULTIPLICA_SCHEDULE_MINUTE = int(
     os.environ.get("MULTIPLICA_SCHEDULE_MINUTE", "50")
+)
+FINANCEIRO_HOJE_SCHEDULE_ENABLED = os.environ.get(
+    "FINANCEIRO_HOJE_SCHEDULE_ENABLED",
+    "false",
+).lower() in ("1", "true", "yes")
+FINANCEIRO_HOJE_TIMEZONE = os.environ.get(
+    "FINANCEIRO_HOJE_TIMEZONE",
+    "America/Sao_Paulo",
 )
 FINANCEIRO_MEDICAO_TIMEZONE = os.environ.get(
     "FINANCEIRO_MEDICAO_TIMEZONE",
@@ -122,6 +135,28 @@ DONE_FILE = DATA_PIPELINE_DIR / "run.done"
 READY_FILE = DATA_PIPELINE_DIR / "signal.ready"
 MULTIPLICA_SIGNAL_FILE = (
     DATA_PIPELINE_DIR / "multiplica" / "multiplica.signal"
+)
+
+
+def _financeiro_hoje_root(
+    values: Mapping[str, object],
+    *,
+    data_pipeline_dir: Path,
+) -> Path:
+    return resolve_financeiro_hoje_root(
+        values.get(
+            "FINANCEIRO_HOJE_ROOT",
+            data_pipeline_dir / "financeiro_hoje",
+        )
+    )
+
+
+FINANCEIRO_HOJE_ROOT = _financeiro_hoje_root(
+    os.environ,
+    data_pipeline_dir=DATA_PIPELINE_DIR,
+)
+FINANCEIRO_HOJE_SIGNAL_FILE = (
+    FINANCEIRO_HOJE_ROOT / "financeiro_hoje.signal"
 )
 
 # RouterBox Backlog artifacts
@@ -261,6 +296,142 @@ def _next_financeiro_medicao_run_at(
     if candidate <= local_now:
         candidate += timedelta(days=1)
     return candidate
+
+
+def _next_financeiro_hoje_run_at(
+    now: datetime | None = None,
+    *,
+    host_timezone=None,
+) -> datetime:
+    from flows.financeiro_hoje.schedule import next_run_at
+
+    host_now = now or datetime.now()
+    configured_timezone = ZoneInfo(FINANCEIRO_HOJE_TIMEZONE)
+    if host_timezone is None:
+        configured_now = host_now.astimezone(configured_timezone)
+    else:
+        configured_now = host_now.replace(
+            tzinfo=host_timezone,
+        ).astimezone(configured_timezone)
+    configured_next = next_run_at(configured_now)
+    input_is_aware = (
+        host_now.tzinfo is not None
+        and host_now.utcoffset() is not None
+    )
+    if input_is_aware and host_timezone is None:
+        return configured_next.astimezone(host_now.tzinfo)
+    if host_timezone is None:
+        host_next = configured_next.astimezone()
+    else:
+        host_next = configured_next.astimezone(host_timezone)
+    return host_next.replace(tzinfo=None)
+
+
+def _run_financeiro_hoje(
+    scheduled_for: datetime | None = None,
+):
+    from flows.financeiro_hoje.runner import run_once
+
+    if scheduled_for is None:
+        return run_once()
+    return run_once(scheduled_for=scheduled_for)
+
+
+def _financeiro_hoje_scheduled_for_runner(
+    slot: datetime,
+    *,
+    host_timezone=None,
+) -> datetime:
+    if slot.tzinfo is None or slot.utcoffset() is None:
+        host_slot = (
+            slot.astimezone()
+            if host_timezone is None
+            else slot.replace(tzinfo=host_timezone)
+        )
+    else:
+        host_slot = slot
+    return host_slot.astimezone(
+        ZoneInfo(FINANCEIRO_HOJE_TIMEZONE)
+    )
+
+
+def _run_scheduled_financeiro_hoje(
+    slot: datetime,
+    *,
+    host_timezone=None,
+):
+    return _run_financeiro_hoje(
+        scheduled_for=_financeiro_hoje_scheduled_for_runner(
+            slot,
+            host_timezone=host_timezone,
+        )
+    )
+
+
+def _restore_financeiro_hoje_signal(raw_signal: str) -> None:
+    try:
+        with FINANCEIRO_HOJE_SIGNAL_FILE.open(
+            "x",
+            encoding="utf-8",
+        ) as handle:
+            handle.write(raw_signal)
+    except FileExistsError:
+        pass
+    except OSError:
+        logger.error("Signal Financeiro Hoje não restaurado.")
+
+
+def _financeiro_hoje_active_run(result: object) -> bool:
+    return isinstance(result, Mapping) and (
+        result.get("state_skipped") == "ACTIVE_RUN"
+        or result.get("code") == "FINANCEIRO_HOJE_BUSY"
+    )
+
+
+def _run_financeiro_hoje_signal_if_allowed() -> bool:
+    if not FINANCEIRO_HOJE_SIGNAL_FILE.exists():
+        return False
+
+    try:
+        raw_signal = FINANCEIRO_HOJE_SIGNAL_FILE.read_text(
+            encoding="utf-8"
+        )
+        payload = json.loads(raw_signal)
+        scheduled_for = datetime.fromisoformat(
+            payload["scheduled_for"]
+        )
+    except (KeyError, OSError, TypeError, ValueError):
+        logger.warning(
+            "Signal Financeiro Hoje inválido; mantendo para correção."
+        )
+        return False
+
+    if ROUTERBOX_ENABLED and not finance_may_start(
+        _local_now(),
+        _next_routerbox_run_at(_local_now()),
+    ):
+        logger.info(
+            "Signal Financeiro Hoje mantido: RouterBox iminente."
+        )
+        return False
+
+    try:
+        FINANCEIRO_HOJE_SIGNAL_FILE.unlink()
+    except OSError:
+        logger.warning("Signal Financeiro Hoje não consumido.")
+        return False
+
+    try:
+        result = _run_financeiro_hoje(
+            scheduled_for=scheduled_for,
+        )
+    except BaseException:
+        _restore_financeiro_hoje_signal(raw_signal)
+        raise
+    if _financeiro_hoje_active_run(result):
+        _restore_financeiro_hoje_signal(raw_signal)
+        return False
+    return True
 
 
 def _run_multiplica_signal_if_present() -> bool:
@@ -929,6 +1100,10 @@ def _scheduled_events(now: datetime | None = None) -> list[tuple[str, datetime]]
         events.append(("routerbox", _next_routerbox_run_at(now)))
     if MULTIPLICA_SCHEDULE_ENABLED:
         events.append(("multiplica", _next_multiplica_run_at(now)))
+    if FINANCEIRO_HOJE_SCHEDULE_ENABLED:
+        events.append(
+            ("financeiro_hoje", _next_financeiro_hoje_run_at(now))
+        )
     financeiro_settings = _financeiro_schedule_settings()
     if financeiro_settings is not None:
         events.append(
@@ -954,6 +1129,8 @@ def _advance_scheduled_event(
         events[name] = _next_routerbox_run_at(now)
     elif name == "multiplica" and MULTIPLICA_SCHEDULE_ENABLED:
         events[name] = _next_multiplica_run_at(now)
+    elif name == "financeiro_hoje" and FINANCEIRO_HOJE_SCHEDULE_ENABLED:
+        events[name] = _next_financeiro_hoje_run_at(now)
     elif name == "financeiro_medicao":
         financeiro_settings = _financeiro_schedule_settings()
         if financeiro_settings is None:
@@ -1017,6 +1194,8 @@ def loop_forever() -> None:
         try:
             if _run_multiplica_signal_if_present():
                 continue
+            if _run_financeiro_hoje_signal_if_allowed():
+                continue
 
             # Determinar qual scheduler dispara primeiro
             if not scheduled_events:
@@ -1041,6 +1220,8 @@ def loop_forever() -> None:
             while remaining > 0:
                 if _run_multiplica_signal_if_present():
                     break
+                if _run_financeiro_hoje_signal_if_allowed():
+                    break
 
                 # Checar signal do Protheus
                 if (
@@ -1062,6 +1243,8 @@ def loop_forever() -> None:
                     _run_routerbox_backlog()
                 elif next_name == "multiplica":
                     _run_scheduled_multiplica()
+                elif next_name == "financeiro_hoje":
+                    _run_scheduled_financeiro_hoje(next_time)
                 elif next_name == "financeiro_medicao":
                     _run_scheduled_financeiro_medicao(
                         scheduled_for=next_time,

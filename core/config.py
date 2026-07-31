@@ -52,6 +52,14 @@ class Settings(BaseSettings):
     ROUTERBOX_END_MINUTE: int = 0
     ROUTERBOX_RUN_ON_START: bool = False
 
+    # Financeiro Hoje automation (disabled until explicitly enabled).
+    FINANCEIRO_HOJE_ROOT: str = "/app/data_pipeline/financeiro_hoje"
+    FINANCEIRO_HOJE_SCHEDULE_ENABLED: bool = False
+    FINANCEIRO_HOJE_TIMEZONE: str = "America/Sao_Paulo"
+    FINANCEIRO_HOJE_DEADLINE_SECONDS: int = 480
+    FINANCEIRO_HOJE_PERIOD_DAYS: int = 10
+    FINANCEIRO_HOJE_POLL_SECONDS: int = 5
+
     @property
     def tecnicos_path(self) -> Path:
         p = Path(self.TECNICOS_JSON)

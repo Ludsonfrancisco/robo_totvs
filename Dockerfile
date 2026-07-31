@@ -30,6 +30,9 @@ RUN playwright install chrome \
 # Copia código do robô
 COPY . .
 
+# Impede que um deploy substitua uma automação por outra silenciosamente.
+RUN python scripts/smoke_automation_capabilities.py
+
 # Cria estrutura do volume compartilhado (igual ao Dockerfile do Portal D+)
 RUN mkdir -p /app/data_pipeline/entrada /app/data_pipeline/processos \
     && chmod -R 775 /app/data_pipeline
