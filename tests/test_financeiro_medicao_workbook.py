@@ -1,0 +1,273 @@
+from datetime import date, datetime
+from io import BytesIO
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import unittest
+import warnings
+from zipfile import ZIP_DEFLATED, ZipFile
+import struct
+
+from openpyxl import Workbook
+
+from flows.financeiro_medicao.workbook import (
+    REQUIRED_HEADERS,
+    SHEET_NAME,
+    WorkbookInvalid,
+    validate_workbook,
+)
+
+
+CANONICAL_ROW = (
+    "123456",
+    "11/07/2026 08:00:00",
+    "PROTO-123",
+    "Cliente Exemplo",
+    "Maria da Silva",
+    "Sao Paulo",
+    "Centro",
+    "Usuario Final",
+    "Executor Exemplo",
+    "15/07/2026 12:30:00",
+    "Empresa Exemplo LTDA",
+    "Empresa Exemplo",
+    "Financeiro",
+    "Medicao",
+    "Pagamento",
+    "Sem causa",
+    "Encerrado",
+    "Nao",
+    "",
+    125.50,
+)
+
+
+class FinanceiroMedicaoWorkbookTests(unittest.TestCase):
+    def make_workbook(self, directory, *, sheet_name=SHEET_NAME, headers=REQUIRED_HEADERS, rows=()):
+        path = Path(directory) / "medicao.xlsx"
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.title = sheet_name
+        worksheet.append(list(headers))
+        for row in rows:
+            worksheet.append(list(row))
+        workbook.save(path)
+        workbook.close()
+        return path
+
+    def rewrite_xlsx(self, source_path, target_path, replacements=(), extra_entries=()):
+        replacements = dict(replacements)
+        with ZipFile(source_path) as source, ZipFile(target_path, "w", ZIP_DEFLATED) as target:
+            for entry in source.infolist():
+                target.writestr(entry, replacements.get(entry.filename, source.read(entry.filename)))
+            for name, content in extra_entries:
+                target.writestr(name, content)
+
+    def patch_zip_entry(self, source_path, target_path, entry_name, *, encrypted=False, corrupt_payload=False):
+        content = bytearray(source_path.read_bytes())
+        central_directory = content.rfind(b"PK\x05\x06")
+        cursor = struct.unpack_from("<I", content, central_directory + 16)[0]
+        while content[cursor : cursor + 4] == b"PK\x01\x02":
+            filename_size, extra_size, comment_size = struct.unpack_from("<HHH", content, cursor + 28)
+            filename = bytes(content[cursor + 46 : cursor + 46 + filename_size]).decode("utf-8")
+            local_offset = struct.unpack_from("<I", content, cursor + 42)[0]
+            if filename == entry_name:
+                if encrypted:
+                    flags = struct.unpack_from("<H", content, cursor + 8)[0] | 1
+                    struct.pack_into("<H", content, cursor + 8, flags)
+                    struct.pack_into("<H", content, local_offset + 6, flags)
+                if corrupt_payload:
+                    local_name_size, local_extra_size = struct.unpack_from("<HH", content, local_offset + 26)
+                    payload_offset = local_offset + 30 + local_name_size + local_extra_size
+                    content[payload_offset + 1] ^= 0xFF
+                target_path.write_bytes(content)
+                return
+            cursor += 46 + filename_size + extra_size + comment_size
+        self.fail(f"Entrada ZIP não encontrada: {entry_name}")
+
+    def test_accepts_canonical_workbook_with_one_row_and_headers(self):
+        with TemporaryDirectory() as directory:
+            path = self.make_workbook(directory, rows=(CANONICAL_ROW,))
+
+            info = validate_workbook(path, date(2026, 7, 11), date(2026, 7, 31))
+
+        self.assertEqual(info.row_count, 1)
+        self.assertEqual(info.headers, REQUIRED_HEADERS)
+        self.assertGreater(info.size, 0)
+
+    def test_accepts_seekable_binary_stream_without_closing_it(self):
+        with TemporaryDirectory() as directory:
+            path = self.make_workbook(
+                directory,
+                rows=(CANONICAL_ROW,),
+            )
+            stream = BytesIO(path.read_bytes())
+
+            info = validate_workbook(
+                stream,
+                date(2026, 7, 11),
+                date(2026, 7, 31),
+            )
+
+        self.assertEqual(info.row_count, 1)
+        self.assertFalse(stream.closed)
+        stream.seek(0)
+        self.assertEqual(stream.read(2), b"PK")
+
+    def test_accepts_highly_compressible_valid_workbook(self):
+        rows = []
+        for row_number in range(10):
+            row = [f"{row_number}-{column}-" + "x" * 10000 for column in range(len(REQUIRED_HEADERS))]
+            row[9] = "15/07/2026 12:30:00"
+            rows.append(row)
+        with TemporaryDirectory() as directory:
+            path = self.make_workbook(directory, rows=rows)
+
+            info = validate_workbook(path, date(2026, 7, 11), date(2026, 7, 31))
+
+        self.assertEqual(info.row_count, 10)
+
+    def test_rejects_wrong_sheet_name(self):
+        with TemporaryDirectory() as directory:
+            path = self.make_workbook(directory, sheet_name="Outra aba", rows=(CANONICAL_ROW,))
+
+            with self.assertRaises(WorkbookInvalid):
+                validate_workbook(path, date(2026, 7, 11), date(2026, 7, 31))
+
+    def test_rejects_fim_data_outside_period(self):
+        row = list(CANONICAL_ROW)
+        row[9] = "01/08/2026 00:00:00"
+        with TemporaryDirectory() as directory:
+            path = self.make_workbook(directory, rows=(row,))
+
+            with self.assertRaisesRegex(WorkbookInvalid, "per[ií]odo"):
+                validate_workbook(path, date(2026, 7, 11), date(2026, 7, 31))
+
+    def test_rejects_missing_or_invalid_fim_data(self):
+        for fim_data in (None, "2026-07-15"):
+            row = list(CANONICAL_ROW)
+            row[9] = fim_data
+            with self.subTest(fim_data=fim_data), TemporaryDirectory() as directory:
+                path = self.make_workbook(directory, rows=(row,))
+
+                with self.assertRaises(WorkbookInvalid):
+                    validate_workbook(path, date(2026, 7, 11), date(2026, 7, 31))
+
+    def test_rejects_wrong_headers(self):
+        headers = list(REQUIRED_HEADERS)
+        headers[0] = "Número"
+        with TemporaryDirectory() as directory:
+            path = self.make_workbook(directory, headers=headers, rows=(CANONICAL_ROW,))
+
+            with self.assertRaises(WorkbookInvalid):
+                validate_workbook(path, date(2026, 7, 11), date(2026, 7, 31))
+
+    def test_rejects_workbook_without_data_rows(self):
+        with TemporaryDirectory() as directory:
+            path = self.make_workbook(directory)
+
+            with self.assertRaises(WorkbookInvalid):
+                validate_workbook(path, date(2026, 7, 11), date(2026, 7, 31))
+
+    def test_rejects_missing_and_non_xlsx_files(self):
+        with TemporaryDirectory() as directory:
+            missing_path = Path(directory) / "missing.xlsx"
+            text_path = Path(directory) / "downloaded.xlsx"
+            text_path.write_text("not an xlsx", encoding="utf-8")
+
+            for path in (missing_path, text_path):
+                with self.subTest(path=path.name):
+                    with self.assertRaises(WorkbookInvalid):
+                        validate_workbook(path, date(2026, 7, 11), date(2026, 7, 31))
+
+    def test_rejects_xlsx_with_malformed_xml(self):
+        with TemporaryDirectory() as directory:
+            valid_path = self.make_workbook(directory, rows=(CANONICAL_ROW,))
+            malformed_path = Path(directory) / "malformed.xlsx"
+            self.rewrite_xlsx(valid_path, malformed_path, {"xl/workbook.xml": b"<workbook>"})
+
+            with self.assertRaises(WorkbookInvalid):
+                validate_workbook(malformed_path, date(2026, 7, 11), date(2026, 7, 31))
+
+    def test_rejects_xlsx_with_semantically_invalid_xml(self):
+        with TemporaryDirectory() as directory:
+            valid_path = self.make_workbook(directory, rows=(CANONICAL_ROW,))
+            malformed_path = Path(directory) / "invalid-sheet-id.xlsx"
+            with ZipFile(valid_path) as source:
+                workbook_xml = source.read("xl/workbook.xml").replace(b'sheetId="1"', b'sheetId="invalid"')
+            self.rewrite_xlsx(valid_path, malformed_path, {"xl/workbook.xml": workbook_xml})
+
+            with self.assertRaises(WorkbookInvalid):
+                validate_workbook(malformed_path, date(2026, 7, 11), date(2026, 7, 31))
+
+    def test_rejects_xlsx_with_corrupted_deflate_payload(self):
+        with TemporaryDirectory() as directory:
+            valid_path = self.make_workbook(directory, rows=(CANONICAL_ROW,))
+            corrupted_path = Path(directory) / "corrupted.xlsx"
+            self.patch_zip_entry(valid_path, corrupted_path, "[Content_Types].xml", corrupt_payload=True)
+
+            with self.assertRaises(WorkbookInvalid):
+                validate_workbook(corrupted_path, date(2026, 7, 11), date(2026, 7, 31))
+
+    def test_rejects_xlsx_with_encrypted_entry(self):
+        with TemporaryDirectory() as directory:
+            valid_path = self.make_workbook(directory, rows=(CANONICAL_ROW,))
+            encrypted_path = Path(directory) / "encrypted.xlsx"
+            self.patch_zip_entry(valid_path, encrypted_path, "[Content_Types].xml", encrypted=True)
+
+            with self.assertRaises(WorkbookInvalid):
+                validate_workbook(encrypted_path, date(2026, 7, 11), date(2026, 7, 31))
+
+    def test_rejects_zip_with_duplicate_entries(self):
+        with TemporaryDirectory() as directory:
+            path = self.make_workbook(directory, rows=(CANONICAL_ROW,))
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                with ZipFile(path, "a", ZIP_DEFLATED) as archive:
+                    archive.writestr("xl/workbook.xml", archive.read("xl/workbook.xml"))
+
+            with self.assertRaises(WorkbookInvalid):
+                validate_workbook(path, date(2026, 7, 11), date(2026, 7, 31))
+
+    def test_releases_file_after_success_and_load_failure(self):
+        with TemporaryDirectory() as directory:
+            valid_path = self.make_workbook(directory, rows=(CANONICAL_ROW,))
+            validate_workbook(valid_path, date(2026, 7, 11), date(2026, 7, 31))
+            renamed_path = valid_path.with_name("renamed.xlsx")
+            valid_path.replace(renamed_path)
+            renamed_path.unlink()
+
+            source_path = self.make_workbook(directory, rows=(CANONICAL_ROW,))
+            malformed_path = Path(directory) / "malformed.xlsx"
+            self.rewrite_xlsx(source_path, malformed_path, {"xl/workbook.xml": b"<workbook>"})
+            with self.assertRaises(WorkbookInvalid):
+                validate_workbook(malformed_path, date(2026, 7, 11), date(2026, 7, 31))
+            malformed_path.unlink()
+
+            iteration_path = Path(directory) / "malformed-sheet.xlsx"
+            self.rewrite_xlsx(source_path, iteration_path, {"xl/worksheets/sheet1.xml": b"<worksheet>"})
+            with self.assertRaises(WorkbookInvalid):
+                validate_workbook(iteration_path, date(2026, 7, 11), date(2026, 7, 31))
+            iteration_path.unlink()
+
+    def test_rejects_inverted_query_period(self):
+        with TemporaryDirectory() as directory:
+            path = self.make_workbook(directory, rows=(CANONICAL_ROW,))
+
+            with self.assertRaises(WorkbookInvalid):
+                validate_workbook(path, date(2026, 7, 31), date(2026, 7, 11))
+
+    def test_accepts_supported_date_formats_and_inclusive_limits(self):
+        start_row = list(CANONICAL_ROW)
+        start_row[9] = "2026-07-11 00:00:00"
+        end_row = list(CANONICAL_ROW)
+        end_row[9] = datetime(2026, 7, 31, 23, 59, 59)
+        with TemporaryDirectory() as directory:
+            path = self.make_workbook(directory, rows=(start_row, end_row))
+
+            info = validate_workbook(path, date(2026, 7, 11), date(2026, 7, 31))
+
+        self.assertEqual(info.row_count, 2)
+
+
+if __name__ == "__main__":
+    unittest.main()

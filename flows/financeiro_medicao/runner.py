@@ -1,0 +1,480 @@
+from datetime import date, datetime
+import os
+from pathlib import Path
+import re
+import time
+from uuid import uuid4
+from zoneinfo import ZoneInfo
+
+from .browser import authenticated_page
+from .bundle import (
+    BundleCollisionError,
+    BundleDurabilityError,
+    PublishedBundleDetails,
+    build_bundle,
+    inspect_committed_publication,
+    inspect_publication_proof,
+    inspect_published_bundle,
+)
+from .config import Settings
+from .cycles import window_for
+from .events import (
+    atomic_json_write as _atomic_json_write,
+    event_owner_lock,
+    event_receipt_path,
+    event_result_path,
+    fsync_directory as _fsync_directory,
+    mkdir_durable as _mkdir_durable,
+    next_scheduled_for as _next_scheduled_for,
+    payload_from_published as _payload_from_published,
+    quarantine_event_result,
+    read_event_result,
+    read_success_receipt as _read_success_receipt,
+    reconcile_published_event,
+    reconcile_published_event_locked as _reconcile_published_event_locked,
+    scheduled_event_identity,
+    write_event_result as _write_event_result,
+    write_success_receipt as _write_success_receipt,
+)
+from .loga import CollectionError, collect
+from .retention import cleanup as cleanup_retention
+from .workbook import WorkbookInvalid
+from flows.common.locks import LockUnavailable, file_lock
+
+
+RETRYABLE_ERRORS = {
+    "NAVIGATION_TIMEOUT",
+    "DOWNLOAD_TIMEOUT",
+    "DOWNLOAD_FAILED",
+}
+_KNOWN_COLLECTION_ERRORS = RETRYABLE_ERRORS | {
+    "AUTH_EXPIRED",
+    "AUTH_STATE_FAILED",
+    "AUTH_STATE_CLEANUP_FAILED",
+    "DOWNLOAD_TEMP_CLEANUP_FAILED",
+    "FILTER_MISMATCH",
+    "UNSUPPORTED_PLATFORM",
+}
+_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_PRIVATE_PREFIX = ".financeiro-medicao-"
+_PRIVATE_SUFFIX = ".xlsx"
+_CLEANUP_DELAYS = (0, 0.01, 0.05)
+
+
+def _ensure_directories(runtime_root: Path) -> None:
+    runtime_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for name in ("inbox", "quarantine", "published", "runtime"):
+        (runtime_root / name).mkdir(
+            parents=True,
+            exist_ok=True,
+            mode=0o700,
+        )
+
+
+def _private_workbook_path(runtime_dir: Path) -> Path:
+    return runtime_dir / (
+        f"{_PRIVATE_PREFIX}{uuid4().hex}{_PRIVATE_SUFFIX}"
+    )
+
+
+def _remove_private_file(path: Path, runtime_dir: Path) -> None:
+    path = Path(path)
+    runtime_dir = Path(runtime_dir)
+    try:
+        is_owned = (
+            path.parent.resolve() == runtime_dir.resolve()
+            and path.name.startswith(_PRIVATE_PREFIX)
+            and path.name.endswith(_PRIVATE_SUFFIX)
+        )
+    except OSError:
+        is_owned = False
+    if not is_owned:
+        raise OSError("Invalid private download path.")
+
+    last_error = None
+    for delay in _CLEANUP_DELAYS:
+        if delay:
+            time.sleep(delay)
+        try:
+            path.unlink(missing_ok=True)
+            return
+        except OSError as error:
+            last_error = error
+    raise OSError("Private download cleanup failed.") from last_error
+
+
+def _safe_error_code(error: Exception) -> str:
+    if isinstance(error, LockUnavailable):
+        return "LOCKED"
+    if isinstance(error, WorkbookInvalid):
+        return "WORKBOOK_INVALID"
+    if isinstance(error, BundleDurabilityError):
+        return "BUNDLE_DURABILITY_FAILED"
+    if isinstance(error, BundleCollisionError):
+        return "BUNDLE_COLLISION"
+    if isinstance(error, CollectionError):
+        if error.code in _KNOWN_COLLECTION_ERRORS:
+            return error.code
+        return "COLLECTION_FAILED"
+    return "UNEXPECTED_ERROR"
+
+
+def _published_run_id(error: Exception) -> str | None:
+    current = error
+    visited = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        if isinstance(current, BundleDurabilityError):
+            candidate = current.published.name
+            if _RUN_ID.fullmatch(candidate):
+                return candidate
+        current = current.__cause__
+    return None
+
+
+def _lock_wait_seconds(settings) -> float:
+    value = getattr(settings, "lock_wait_seconds", 0)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    return value
+
+
+def _write_done(runtime_root: Path, payload: dict) -> None:
+    _atomic_json_write(runtime_root / "done.json", payload)
+
+
+def _finish_with_retention(
+    payload,
+    runtime_root,
+    *,
+    now,
+    current_references,
+):
+    try:
+        cleanup_retention(
+            Path(runtime_root).resolve(strict=True),
+            current_references=current_references,
+            now=now,
+        )
+    except Exception:
+        pass
+    return payload
+
+
+def _retention_references(runtime_root, payload, event_id):
+    runtime_root = Path(runtime_root)
+    references = []
+    run_id = payload.get("run_id") if isinstance(payload, dict) else None
+    if isinstance(run_id, str) and _RUN_ID.fullmatch(run_id):
+        references.extend(
+            (
+                runtime_root / "inbox" / run_id,
+                runtime_root / "runtime" / "proofs" / run_id,
+            )
+        )
+    if event_id is not None:
+        references.extend(
+            (
+                event_result_path(runtime_root, event_id),
+                event_receipt_path(runtime_root, event_id),
+            )
+        )
+    return references
+
+
+def _collect_bundle(
+    *,
+    page,
+    settings,
+    window,
+    collector,
+    bundle_builder,
+    started_at,
+    scheduled_for,
+    run_id,
+    image_revision,
+    clock,
+):
+    runtime_dir = Path(settings.runtime_root) / "runtime"
+    private_file = _private_workbook_path(runtime_dir)
+    primary_error = None
+    cleanup_error = None
+    published = None
+    try:
+        try:
+            collected = Path(
+                collector(page, window, settings, private_file)
+            )
+            if collected.resolve() != private_file.resolve():
+                raise CollectionError("DOWNLOAD_FAILED")
+            finished_at = clock()
+            bundle_arguments = dict(
+                runtime_root=Path(settings.runtime_root),
+                source=private_file,
+                window=window,
+                scheduled_for=scheduled_for,
+                started_at=started_at,
+                finished_at=finished_at,
+                image_revision=image_revision,
+            )
+            if run_id is not None:
+                bundle_arguments["run_id"] = run_id
+            published = bundle_builder(**bundle_arguments)
+        except BaseException as error:
+            primary_error = error
+    finally:
+        try:
+            _remove_private_file(private_file, runtime_dir)
+        except OSError as error:
+            cleanup_error = error
+
+    if primary_error is not None and not isinstance(
+        primary_error,
+        Exception,
+    ):
+        raise primary_error
+    if cleanup_error is not None:
+        cleanup_failure = CollectionError(
+            "DOWNLOAD_TEMP_CLEANUP_FAILED"
+        )
+        if primary_error is not None:
+            raise cleanup_failure from primary_error
+        raise cleanup_failure from cleanup_error
+    if primary_error is not None:
+        raise primary_error
+    return Path(published)
+
+
+def _status_payload(
+    *,
+    settings,
+    window,
+    started_at,
+    finished_at,
+    run_id,
+    error_code,
+):
+    return {
+        "success": not error_code,
+        "error_code": error_code,
+        "run_id": run_id,
+        "cycle_id": window.cycle_id,
+        "mode": window.mode,
+        "started_at": started_at.isoformat(),
+        "finished_at": finished_at.isoformat(),
+        "next_scheduled_for": _next_scheduled_for(
+            settings,
+            finished_at,
+        ),
+    }
+
+
+def run_once(
+    *,
+    settings: Settings | None = None,
+    day: date | None = None,
+    page_factory=None,
+    collector=None,
+    bundle_builder=None,
+    sleeper=None,
+    clock=None,
+    scheduled_for: datetime | None = None,
+    image_revision: str | None = None,
+    event_id: str | None = None,
+):
+    settings = settings or Settings.from_mapping(os.environ)
+    runtime_root = Path(settings.runtime_root)
+    _ensure_directories(runtime_root)
+    page_factory = page_factory or authenticated_page
+    collector = collector or collect
+    bundle_builder = bundle_builder or build_bundle
+    sleeper = sleeper or time.sleep
+    if clock is None:
+        timezone = ZoneInfo(settings.timezone)
+        clock = lambda: datetime.now(timezone)
+
+    started_at = clock()
+    scheduled_for = scheduled_for or started_at
+    deterministic_run_id = None
+    if event_id is not None:
+        expected_event_id, deterministic_run_id = (
+            scheduled_event_identity(scheduled_for)
+        )
+        if event_id != expected_event_id:
+            raise ValueError("Event identity does not match schedule.")
+    day = day or started_at.date()
+    window = window_for(day)
+    image_revision = (
+        str(image_revision).strip()
+        if image_revision is not None
+        else os.environ.get("IMAGE_REVISION", "").strip()
+    ) or "unknown"
+    flow_lock = runtime_root / "runtime" / "financeiro_medicao.lock"
+    chromium_lock = runtime_root.parent / "runtime" / "chromium.lock"
+    lock_wait_seconds = _lock_wait_seconds(settings)
+    run_id = None
+    error_code = ""
+    published_details = None
+
+    try:
+        with file_lock(flow_lock, wait_seconds=lock_wait_seconds):
+            if event_id is not None:
+                existing = read_event_result(
+                    runtime_root,
+                    event_id,
+                    scheduled_for,
+                )
+                if existing is not None and (
+                    existing.get("success") is True
+                    or existing.get("error_code")
+                    not in RETRYABLE_ERRORS | {"UNEXPECTED_ERROR"}
+                ):
+                    return _finish_with_retention(
+                        existing,
+                        runtime_root,
+                        now=started_at,
+                        current_references=_retention_references(
+                            runtime_root,
+                            existing,
+                            event_id,
+                        ),
+                    )
+                recovered = _reconcile_published_event_locked(
+                    settings,
+                    event_id,
+                    scheduled_for,
+                )
+                if recovered is not None:
+                    return _finish_with_retention(
+                        recovered,
+                        runtime_root,
+                        now=started_at,
+                        current_references=_retention_references(
+                            runtime_root,
+                            recovered,
+                            event_id,
+                        ),
+                    )
+            try:
+                with file_lock(
+                    chromium_lock,
+                    wait_seconds=lock_wait_seconds,
+                ):
+                    with page_factory(settings) as page:
+                        for attempt in range(1, 4):
+                            try:
+                                published = _collect_bundle(
+                                    page=page,
+                                    settings=settings,
+                                    window=window,
+                                    collector=collector,
+                                    bundle_builder=bundle_builder,
+                                    started_at=started_at,
+                                    scheduled_for=scheduled_for,
+                                    run_id=deterministic_run_id,
+                                    image_revision=image_revision,
+                                    clock=clock,
+                                )
+                                candidate_run_id = published.name
+                                if not _RUN_ID.fullmatch(candidate_run_id):
+                                    raise RuntimeError(
+                                        "Invalid bundle identifier."
+                                    )
+                                run_id = candidate_run_id
+                                if event_id is not None:
+                                    published_details = (
+                                        inspect_committed_publication(
+                                            runtime_root=runtime_root,
+                                            run_id=run_id,
+                                            window=window,
+                                            scheduled_for=scheduled_for,
+                                        )
+                                    )
+                                    if published_details is None:
+                                        raise RuntimeError(
+                                            "Published bundle disappeared."
+                                        )
+                                error_code = ""
+                                break
+                            except Exception as error:
+                                published_run_id = _published_run_id(
+                                    error
+                                )
+                                if published_run_id is not None:
+                                    run_id = published_run_id
+                                error_code = _safe_error_code(error)
+                                if (
+                                    error_code not in RETRYABLE_ERRORS
+                                    or attempt == 3
+                                ):
+                                    break
+                                sleeper(1)
+            except Exception as error:
+                error_code = _safe_error_code(error)
+
+            finished_at = clock()
+            payload = (
+                _payload_from_published(
+                    settings,
+                    published_details,
+                )
+                if (
+                    event_id is not None
+                    and not error_code
+                    and published_details is not None
+                )
+                else _status_payload(
+                    settings=settings,
+                    window=window,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    run_id=(
+                        None
+                        if error_code == "BUNDLE_COLLISION"
+                        else run_id
+                    ),
+                    error_code=error_code,
+                )
+            )
+            if event_id is not None:
+                if payload["success"]:
+                    _write_success_receipt(
+                        runtime_root,
+                        event_id,
+                        scheduled_for,
+                        published_details,
+                    )
+                _write_event_result(
+                    runtime_root,
+                    event_id,
+                    scheduled_for,
+                    payload,
+                )
+            _write_done(runtime_root, payload)
+            return _finish_with_retention(
+                payload,
+                runtime_root,
+                now=finished_at,
+                current_references=_retention_references(
+                    runtime_root,
+                    payload,
+                    event_id,
+                ),
+            )
+    except LockUnavailable:
+        error_code = "LOCKED"
+
+    finished_at = clock()
+    payload = _status_payload(
+        settings=settings,
+        window=window,
+        started_at=started_at,
+        finished_at=finished_at,
+        run_id=run_id,
+        error_code=error_code,
+    )
+    return payload
+
+
+if __name__ == "__main__":
+    raise SystemExit(0 if run_once()["success"] else 1)
