@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <title>Relatórios Personalizados</title>
+</head>
+<body>
+  <table>
+    <tr id="idMenuHeader">
+      <td>
+        <header>
+          <div><div><div><div aria-label="Abrir menu">Menu</div></div></div></div>
+        </header>
+      </td>
+    </tr>
+  </table>
+  <nav>
+    <a id="item_1" role="link">Empresa</a>
+    <a id="item_200" role="link">Relatórios</a>
+    <a id="item_273" role="link">Relatórios Personalizados</a>
+  </nav>
+  <iframe id="iframe_app_menu" name="app_menu_iframe" title="Menu da aplicação"></iframe>
+  <main>
+    <h1>Relatórios Personalizados</h1>
+    <button type="button">Gerar</button>
+    <label for="report">Selecione</label>
+    <select id="report" name="report">
+      <option>Agendamento de atendimentos</option>
+    </select>
+    <label for="start">Início</label>
+    <input id="start" name="start" type="text">
+    <label for="end">Fim</label>
+    <input id="end" name="end" type="text">
+    <button type="button">OK</button>
+    <button type="button" aria-label="Atualizar/Recarregar dados">Atualizar/Recarregar</button>
+    <table aria-label="Relatórios solicitados">
+      <tr>
+        <td>Agendamento de atendimentos</td>
+        <td>27/07/2026</td>
+        <td>06/08/2026</td>
+        <td>Concluído</td>
+        <td>
+          <button type="button" title="Visualizar relatório personalizado"></button>
+        </td>
+      </tr>
+    </table>
+    <section aria-label="Exportação XLS">
+      <button type="button">Avançado</button>
+      <button type="button">Excel</button>
+      <a role="button" title="Baixar">Baixar</a>
+    </section>
+  </main>
+</body>
+</html>
