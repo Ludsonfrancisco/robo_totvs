@@ -62,6 +62,7 @@ from loguru import logger
 
 from flows.common.locks import LockUnavailable, file_lock
 from flows.financeiro_medicao import schedule as financeiro_schedule
+from flows.financeiro_medicao.config import Settings as FinanceiroMedicaoSettings
 
 DATA_PIPELINE_DIR = Path(os.environ.get("DATA_PIPELINE_DIR", "/app/data_pipeline"))
 GLOBAL_CHROMIUM_LOCK = DATA_PIPELINE_DIR / "runtime" / "chromium.lock"
@@ -166,6 +167,18 @@ def _financeiro_schedule_settings(
 ):
     if require_enabled and not FINANCEIRO_MEDICAO_SCHEDULE_ENABLED:
         return None
+    if require_enabled:
+        try:
+            settings = FinanceiroMedicaoSettings.from_mapping(os.environ)
+            if not settings.schedule_enabled:
+                raise ValueError("schedule disabled")
+        except (OSError, ValueError):
+            logger.error(
+                "[financeiro_medicao] Agenda desabilitada; "
+                "error_code=CONFIG_INVALID."
+            )
+            return None
+        return settings
     try:
         timezone_name = str(FINANCEIRO_MEDICAO_TIMEZONE).strip()
         ZoneInfo(timezone_name)

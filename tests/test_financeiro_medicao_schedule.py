@@ -1224,7 +1224,21 @@ class FinanceiroMedicaoWorkerIntegrationTests(unittest.TestCase):
     def test_worker_uses_financeiro_catch_up_when_enabled(self):
         timezone = ZoneInfo("America/Sao_Paulo")
         now = datetime(2026, 7, 30, 0, 10, tzinfo=timezone)
-        with tempfile.TemporaryDirectory() as temporary, patch.object(
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(
+            os.environ,
+            {
+                "FINANCEIRO_MEDICAO_LOGA_URL": (
+                    "https://dashboard.loga.net.br/medicao_pagamento"
+                ),
+                "FINANCEIRO_MEDICAO_RUNTIME_ROOT": str(
+                    Path(temporary) / "financeiro_medicao"
+                ),
+                "FINANCEIRO_MEDICAO_SCHEDULE_ENABLED": "true",
+                "FINANCEIRO_MEDICAO_SCHEDULE_HOUR": "0",
+                "FINANCEIRO_MEDICAO_SCHEDULE_MINUTE": "1",
+                "FINANCEIRO_MEDICAO_TIMEZONE": "America/Sao_Paulo",
+            },
+        ), patch.object(
             worker, "FINANCEIRO_MEDICAO_SCHEDULE_ENABLED", True
         ), patch.object(
             worker, "FINANCEIRO_MEDICAO_TIMEZONE", "America/Sao_Paulo"
